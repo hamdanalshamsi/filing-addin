@@ -17,6 +17,12 @@
 
 <main>
   <div id="loading" class="muted">Loading…</div>
+  <div id="signin" class="card" hidden>
+    <h2>Sign in</h2>
+    <p class="muted small">Sign in once with your HAS account so the add-in can read the matter list and file emails.</p>
+    <button id="signin-btn" class="primary">Sign in</button>
+    <div id="signin-detail" class="hint muted"></div>
+  </div>
 
   <!-- READ MODE -->
   <section id="read" hidden>
@@ -67,7 +73,7 @@
   <div id="err" class="error" hidden></div>
 </main>
 
-<footer class="muted small">Signed in as <span id="who">…</span></footer>
+<footer class="muted small">Signed in as <span id="who">…</span><br><span id="diag"></span> · v1.1</footer>
 <script src="taskpane.js"></script>
 </body>
 </html>

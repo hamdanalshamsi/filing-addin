@@ -25,25 +25,38 @@ function fail(e) {
 }
 
 /* ---------- auth ---------- */
+const withTimeout = (p, ms, label) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error(label + " timed out")), ms))]);
+const setLoading = (t) => { const l = $("loading"); l.hidden = false; l.textContent = t; };
+let naa = false, cached = null;
 async function initAuth() {
-  const conf = { auth: { clientId: CFG.clientId, authority: `https://login.microsoftonline.com/${CFG.tenant}` },
+  const conf = { auth: { clientId: CFG.clientId, authority: `https://login.microsoftonline.com/${CFG.tenant}`,
+                         redirectUri: location.origin + location.pathname },
                  cache: { cacheLocation: "localStorage" } };
-  pca = await msal.createNestablePublicClientApplication(conf);
-}
-async function token() {
-  const req = { scopes: SCOPES };
+  naa = !!(Office.context.requirements && Office.context.requirements.isSetSupported("NestedAppAuth", "1.1"));
   try {
-    const login = Office.context.mailbox.userProfile.emailAddress;
-    const acct = pca.getAllAccounts().find(a => (a.username || "").toLowerCase() === login.toLowerCase());
-    const r = await pca.acquireTokenSilent({ ...req, account: acct, loginHint: login });
-    return r.accessToken;
+    pca = await withTimeout(msal.createNestablePublicClientApplication(conf), 10000, "Sign-in setup");
   } catch (e) {
-    const r = await pca.acquireTokenPopup({ ...req, loginHint: Office.context.mailbox.userProfile.emailAddress });
-    return r.accessToken;
+    naa = false;
+    pca = new msal.PublicClientApplication(conf);
+    await pca.initialize();
+  }
+}
+// interactive=true only from a button click (pop-ups need a user click)
+async function token(interactive) {
+  if (cached && cached.exp > Date.now() + 60000) return cached.t;
+  const login = Office.context.mailbox.userProfile.emailAddress;
+  const req = { scopes: SCOPES, loginHint: login };
+  const keep = (r) => { cached = { t: r.accessToken, exp: r.expiresOn ? new Date(r.expiresOn).getTime() : Date.now() + 30 * 60000 }; return r.accessToken; };
+  try {
+    const acct = pca.getAllAccounts().find(a => (a.username || "").toLowerCase() === login.toLowerCase());
+    return keep(await withTimeout(pca.acquireTokenSilent({ ...req, account: acct }), 12000, "Silent sign-in"));
+  } catch (e) {
+    if (!interactive) { const n = new Error("SIGNIN_NEEDED: " + (e.errorCode || e.message || e)); n.needSignIn = true; throw n; }
+    return keep(await pca.acquireTokenPopup(req));
   }
 }
 async function gfetch(url, opt = {}) {
-  const t = await token();
+  const t = await token(false);
   const headers = { Authorization: "Bearer " + t, ...(opt.headers || {}) };
   const r = await fetch(url.startsWith("http") ? url : G + url, { ...opt, headers });
   if (!r.ok && r.status !== 404) {
@@ -283,11 +296,28 @@ async function fileEmail() {
 }
 
 /* ---------- start ---------- */
-Office.onReady(async () => {
+const IS_AUTH_POPUP = !!window.opener && /(code|error)=/.test(location.hash + location.search);
+if (!IS_AUTH_POPUP) Office.onReady(async () => {
   try {
     $("who").textContent = Office.context.mailbox.userProfile.emailAddress;
+    const diag = $("diag"); if (diag) diag.textContent = `${Office.context.diagnostics ? Office.context.diagnostics.platform + " " + Office.context.diagnostics.version : ""}`;
+    setLoading("Signing in…");
     await initAuth();
-    await initSite();
+    if (diag) diag.textContent += naa ? " · NAA" : " · popup sign-in";
+    try { await token(false); }
+    catch (e) {
+      if (!e.needSignIn) throw e;
+      $("loading").hidden = true;
+      $("signin").hidden = false;
+      $("signin-detail").textContent = String(e.message || "").replace("SIGNIN_NEEDED: ", "");
+      await new Promise((res) => { $("signin-btn").onclick = async () => {
+        $("signin-btn").disabled = true;
+        try { await token(true); $("signin").hidden = true; res(); }
+        catch (err) { $("signin-btn").disabled = false; $("signin-detail").textContent = "Sign-in failed: " + (err.errorCode || err.message || err); }
+      }; });
+    }
+    setLoading("Connecting to Matter Filing site…");
+    await withTimeout(initSite(), 20000, "Connecting to Matter Filing site");
     if (!listIds.index || !listIds.log || !listIds.requests || !inboxDriveId) throw new Error("Matter Filing site lists are missing or you don't have access to the Matter Filing site.");
     const compose = typeof Office.context.mailbox.item.subject === "object";
     $("loading").hidden = true;
