@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>HAS Filing</title>
+<script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
+<script src="config.js"></script>
+<script src="msal-browser.min.js"></script>
+<link rel="stylesheet" href="taskpane.css">
+</head>
+<body>
+<header>
+  <img src="icon-32.png" alt="" width="24" height="24">
+  <h1>HAS Filing</h1>
+</header>
+
+<main>
+  <div id="loading" class="muted">Loading…</div>
+
+  <!-- READ MODE -->
+  <section id="read" hidden>
+    <div class="card">
+      <h2>Filing status</h2>
+      <div id="status" class="muted">Checking…</div>
+    </div>
+
+    <div class="card">
+      <h2>File this email</h2>
+      <label for="r-matter">Matter number</label>
+      <div class="row">
+        <input id="r-matter" placeholder="e.g. 261760 or 261760A" maxlength="8" autocomplete="off">
+        <button id="r-check" class="secondary">Check</button>
+      </div>
+      <div id="r-check-result" class="hint"></div>
+      <label class="chk"><input type="checkbox" id="r-att" checked> Include attachments</label>
+      <button id="r-file" class="primary" disabled>File to matter</button>
+      <div id="r-file-result" class="hint"></div>
+    </div>
+  </section>
+
+  <!-- COMPOSE MODE -->
+  <section id="compose" hidden>
+    <div class="card">
+      <h2>Matter tag</h2>
+      <label for="c-matter">Matter number</label>
+      <div class="row">
+        <input id="c-matter" placeholder="e.g. 261760 or 261760A" maxlength="8" autocomplete="off">
+        <button id="c-check" class="secondary">Check</button>
+      </div>
+      <div id="c-check-result" class="hint"></div>
+      <button id="c-add" class="primary" disabled>Add tag to subject</button>
+      <div id="c-add-result" class="hint"></div>
+    </div>
+
+    <div class="card">
+      <h2>Do not file</h2>
+      <p class="muted small">Adds a marker to the subject so this email is never filed.</p>
+      <div class="row">
+        <button id="c-conf" class="secondary">[Confidential]</button>
+        <button id="c-pers" class="secondary">[Personal]</button>
+      </div>
+      <div id="c-dnf-result" class="hint"></div>
+    </div>
+  </section>
+
+  <div id="err" class="error" hidden></div>
+</main>
+
+<footer class="muted small">Signed in as <span id="who">…</span></footer>
+<script src="taskpane.js"></script>
+</body>
+</html>
