@@ -28,3 +28,4 @@ footer{padding:8px 14px;border-top:1px solid var(--line)}
 button.secondary:hover{border-color:var(--brand)}
 input:focus{outline:2px solid var(--brand);outline-offset:0}
 input[type=checkbox]{accent-color:var(--brand)}
+.att{display:flex;gap:6px;align-items:flex-start;margin:4px 0;font-size:13px}.att.saved .tick{color:var(--ok);font-weight:700;width:16px;text-align:center}.att .tick{width:16px;text-align:center}

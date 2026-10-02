@@ -137,25 +137,65 @@ async function addMarker(marker) {
 }
 
 /* ---------- read: status ---------- */
+let filedState = null;   // { matter, row, idx, saved:Set(attachmentId) } for the latest Filed row
+const fmtWhen = (d) => new Date(d).toLocaleString("en-GB", { timeZone: CFG.timeZone, dateStyle: "medium", timeStyle: "short" });
 async function loadStatus() {
   const item = Office.context.mailbox.item;
   const key = item.internetMessageId;
   const box = $("status");
   if (!key) { box.textContent = "No message ID available for this item."; return; }
   const [log, reqs] = await Promise.all([findLog(key), findRequests(key)]);
-  const rows = [];
-  for (const l of log) {
-    const when = new Date(l.created).toLocaleString("en-GB", { timeZone: CFG.timeZone, dateStyle: "medium", timeStyle: "short" });
-    if (l.Status === "Filed") rows.push(`<div class="status-item ok">✓ Filed to <b>${esc(l.MatterNo)}</b> · ${esc(when)}${l.FolderPath ? ` · <a href="${esc(l.FolderPath)}" target="_blank" rel="noopener">open folder</a>` : ""}</div>`);
-    else if (l.Status === "Review") rows.push(`<div class="status-item warn">In review${l.MatterNo ? " (" + esc(l.MatterNo) + ")" : ""} – ${esc(l.Error || "")} · ${esc(when)}</div>`);
-    else if (l.Status === "Removed") rows.push(`<div class="status-item muted">Removed from ${esc(l.MatterNo)} · ${esc(when)}</div>`);
-    else rows.push(`<div class="status-item bad">${esc(l.Status)}${l.MatterNo ? " (" + esc(l.MatterNo) + ")" : ""} · ${esc(when)}</div>`);
+  const events = [
+    ...log.map(l => ({ t: new Date(l.created).getTime(), kind: "log", l })),
+    ...reqs.filter(r => r.Status === "Pending" || r.Status === "Failed").map(r => ({ t: new Date(r.created).getTime(), kind: "req", r })),
+  ].sort((x, y) => y.t - x.t);
+  const cats = item.categories ? await mbxAsync((cb) => item.categories.getAsync(cb)).catch(() => []) : [];
+  const dnf = (cats || []).some(c => c.displayName === DNF_CATEGORY);
+  let html = "";
+  const e = events[0];
+  if (e && e.kind === "log") {
+    const l = e.l, when = fmtWhen(l.created);
+    if (l.Status === "Filed") html = `<div class="status-item ok">✓ Filed to <b>${esc(l.MatterNo)}</b> · ${esc(when)}${l.FolderPath ? ` · <a href="${esc(l.FolderPath)}" target="_blank" rel="noopener">open folder</a>` : ""}</div>`;
+    else if (l.Status === "Review") html = `<div class="status-item warn">In review${l.MatterNo ? " (" + esc(l.MatterNo) + ")" : ""} · ${esc(when)}</div>`;
+    else if (l.Status === "Removed") html = `<div class="status-item muted">Removed from ${esc(l.MatterNo)} · ${esc(when)}</div>`;
+    else html = `<div class="status-item bad">Not filed – last attempt failed${l.MatterNo ? " (" + esc(l.MatterNo) + ")" : ""} · ${esc(when)}</div>`;
+  } else if (e && e.kind === "req") {
+    html = e.r.Status === "Pending" ? `<div class="status-item muted">⏳ Being filed to ${esc(e.r.MatterTag || e.r.MatterNo)} – usually within 5 minutes</div>`
+                                    : `<div class="status-item bad">Filing to ${esc(e.r.MatterTag || e.r.MatterNo)} failed: ${esc(e.r.Result || "")}</div>`;
   }
-  for (const r of reqs.filter(r => r.Status === "Pending")) rows.push(`<div class="status-item muted">⏳ Queued for ${esc(r.MatterTag || r.MatterNo)} – will be filed within ~5 minutes</div>`);
-  for (const r of reqs.filter(r => r.Status === "Failed")) rows.push(`<div class="status-item bad">Add-in request failed for ${esc(r.MatterTag || r.MatterNo)}: ${esc(r.Result || "")}</div>`);
-  const cats = Office.context.mailbox.item.categories ? await mbxAsync((cb) => Office.context.mailbox.item.categories.getAsync(cb)).catch(() => []) : [];
-  if ((cats || []).some(c => c.displayName === DNF_CATEGORY)) rows.unshift(`<div class="status-item warn">⛔ Marked Do not file</div>`);
-  box.className = ""; box.innerHTML = rows.length ? rows.join("") : `<span class="muted">Not filed yet.</span>`;
+  if (dnf) html = `<div class="status-item warn">⛔ Marked Do not file</div>` + html;
+  box.className = ""; box.innerHTML = html || `<span class="muted">Not filed yet.</span>`;
+  // which attachments are already saved?
+  const latestFiled = log.filter(l => l.Status === "Filed").sort((x, y) => new Date(y.created) - new Date(x.created))[0];
+  const stillFiled = latestFiled && !(e && e.kind === "log" && e.l.Status === "Removed");
+  filedState = null;
+  if (stillFiled) {
+    const idx = await findIndex(latestFiled.MatterNo).catch(() => null);
+    const saved = new Set();
+    if (idx && idx.DriveId && idx.AttachmentsFolderId) {
+      const kids = await attachmentFiles(idx).catch(() => []);
+      for (const r of log.filter(l => l.Status === "Filed" && l.MatterNo === latestFiled.MatterNo))
+        for (const id of matchSavedAttachments(kids, r.created)) saved.add(id);
+    }
+    filedState = { matter: latestFiled.MatterNo, row: latestFiled, idx, saved };
+    if (!$("r-matter").value) $("r-matter").value = latestFiled.MatterNo;
+  }
+  renderAttachmentList();
+}
+async function attachmentFiles(idx) {
+  return ((await gjson(`/drives/${idx.DriveId}/items/${idx.AttachmentsFolderId}/children?$select=id,name,createdDateTime&$top=999`)) || { value: [] }).value;
+}
+// email attachments that have a matching file (same name, or dated / renamed copy) saved within 20 min of a filing
+function matchSavedAttachments(kids, filedAt, alsoRecent) {
+  const t0 = new Date(filedAt).getTime(), out = [];
+  for (const a of Office.context.mailbox.item.attachments || []) {
+    const n = (cleanName(a.name) || "attachment").toLowerCase(), i = n.lastIndexOf(".");
+    const stem = i > 0 ? n.slice(0, i) : n, ext = i > 0 ? n.slice(i) : "";
+    if (kids.some(k => { const kn = k.name.toLowerCase(); const kt = new Date(k.createdDateTime).getTime();
+          return kn.startsWith(stem) && (!ext || kn.endsWith(ext)) && (Math.abs(kt - t0) < 20 * 60000 || (alsoRecent && kt >= alsoRecent)); }))
+      out.push(a.id);
+  }
+  return out;
 }
 
 /* ---------- read: file this email ---------- */
@@ -197,19 +237,31 @@ function selectedAttachmentIds() {
 function renderAttachmentList() {
   const box = $("r-att-list"), item = Office.context.mailbox.item;
   const list = (item.attachments || []);
-  if (!list.length) { box.innerHTML = '<span class="muted small">No attachments.</span>'; return; }
-  box.innerHTML = list.map((a, i) => {
+  const saved = filedState ? filedState.saved : new Set();
+  if (!list.length) { box.innerHTML = '<span class="muted small">No attachments.</span>'; updateFileButton(); return; }
+  box.innerHTML = list.map((a) => {
     const kb = a.size ? (a.size >= 1048576 ? (a.size / 1048576).toFixed(1) + " MB" : Math.max(1, Math.round(a.size / 1024)) + " KB") : "";
-    if (a.attachmentType === "cloud") return `<label class="chk att disabled"><input type="checkbox" disabled> ${esc(a.name)} <span class="muted small">(cloud link – not saved)</span></label>`;
+    if (saved.has(a.id)) return `<div class="att saved"><span class="tick">✓</span> ${esc(a.name)} <span class="muted small">${kb} · saved</span></div>`;
+    if (a.attachmentType === "cloud") return `<div class="att disabled"><span class="tick muted">–</span> ${esc(a.name)} <span class="muted small">cloud link · not saved</span></div>`;
     const small = a.isInline && a.size < CFG.inlineSkipBytes;
     return `<label class="chk att"><input type="checkbox" value="${esc(a.id)}" ${small ? "" : "checked"}> ${esc(a.name)} <span class="muted small">${kb}${small ? " · inline image" : ""}</span></label>`;
-  }).join("") + `<div class="row small"><a href="#" id="att-all">Select all</a> · <a href="#" id="att-none">None</a></div>`;
-  $("att-all").onclick = (e) => { e.preventDefault(); box.querySelectorAll("input:not([disabled])").forEach(c => c.checked = true); };
-  $("att-none").onclick = (e) => { e.preventDefault(); box.querySelectorAll("input").forEach(c => c.checked = false); };
+  }).join("");
+  box.querySelectorAll("input[type=checkbox]").forEach(c => c.onchange = updateFileButton);
+  updateFileButton();
 }
-async function collectParts(item, wantedIds, out) {
-  show(out, "Reading email…", "muted");
-  const eml = b64ToBytes(await mbxAsync((cb) => item.getAsFileAsync(cb)));
+function updateFileButton() {
+  const btn = $("r-file"), sel = selectedAttachmentIds().length;
+  if (filedState) {
+    btn.textContent = sel ? `Save ${sel} selected attachment${sel > 1 ? "s" : ""} to ${filedState.matter}` : "Already filed";
+    btn.disabled = !sel;
+  } else {
+    btn.textContent = "File to matter";
+    btn.disabled = !parseMatter($("r-matter").value);
+  }
+}
+async function collectParts(item, wantedIds, out, attachmentsOnly) {
+  show(out, attachmentsOnly ? "Reading attachments…" : "Reading email…", "muted");
+  const eml = attachmentsOnly ? null : b64ToBytes(await mbxAsync((cb) => item.getAsFileAsync(cb)));
   const atts = []; let skipped = 0;
   {
     for (const a of item.attachments || []) {
@@ -274,6 +326,30 @@ async function fileEmail() {
   const item = Office.context.mailbox.item;
   const key = item.internetMessageId;
   btn.disabled = true;
+  // already filed: only save the extra attachments that were ticked
+  if (filedState) {
+    try {
+      const ids = selectedAttachmentIds(); if (!ids.length) return;
+      const idx = filedState.idx;
+      if (!(idx && idx.DriveId && idx.AttachmentsFolderId)) throw new Error("The matter folder isn't known yet – try again in a few minutes.");
+      const st = stamp(new Date(item.dateTimeCreated || Date.now()));
+      const startedAt = Date.now() - 60000;
+      const parts = await collectParts(item, ids, out, true);
+      let n = 0;
+      for (const a of parts.atts) {
+        show(out, `Saving attachment ${++n} of ${parts.atts.length}…`, "muted");
+        const i = a.name.lastIndexOf(".");
+        const nm = i > 0 ? `${a.name.slice(0, i)} – ${st}${a.name.slice(i)}` : `${a.name} – ${st}`;
+        await uploadTo(`/drives/${idx.DriveId}/items/${idx.AttachmentsFolderId}`, nm, a.bytes);
+      }
+      for (const id of ids) filedState.saved.add(id);
+      renderAttachmentList();
+      show(out, `✓ Saved ${parts.atts.length} attachment(s) to ${esc(filedState.matter)}.`, "ok");
+    } catch (e) {
+      show(out, (e.status === 401 || e.status === 403) ? "You don't have edit access to this matter folder. Please ask IT to save it." : "Failed: " + esc(e.message || e), "bad");
+    } finally { updateFileButton(); }
+    return;
+  }
   try {
     if (!Office.context.requirements.isSetSupported("Mailbox", "1.14") || !item.getAsFileAsync)
       throw new Error("This Outlook version can't export the email. Please update Outlook (needs Mailbox 1.14).");
@@ -310,7 +386,7 @@ async function fileEmail() {
     pollStatus(key);
   } catch (e) {
     show(out, "Failed: " + esc(e.message || e), "bad");
-  } finally { btn.disabled = false; }
+  } finally { updateFileButton(); }
 }
 
 
@@ -318,11 +394,13 @@ async function fileEmail() {
 const DNF_CATEGORY = "Do not file / Personal";
 async function ensureCategory() {
   const mc = Office.context.mailbox.masterCategories;
-  if (!mc) return;
+  if (!mc) throw new Error("NOCAT");
   const have = await mbxAsync((cb) => mc.getAsync(cb)).catch(() => []);
-  if (!(have || []).some(c => c.displayName === DNF_CATEGORY))
-    await mbxAsync((cb) => mc.addAsync([{ displayName: DNF_CATEGORY, color: Office.MailboxEnums.CategoryColor.Preset0 }], cb)).catch(() => {});
+  if ((have || []).some(c => c.displayName === DNF_CATEGORY)) return;
+  try { await mbxAsync((cb) => mc.addAsync([{ displayName: DNF_CATEGORY, color: Office.MailboxEnums.CategoryColor.Preset0 }], cb)); }
+  catch (e) { const err = new Error("NOCAT"); err.detail = e && (e.message || e.name); throw err; }
 }
+const NOCAT_MSG = `Outlook didn't let the add-in create the "${DNF_CATEGORY}" category. Create it once yourself: in Outlook, <b>Categorize → All categories → New</b>, name it exactly <b>${DNF_CATEGORY}</b>, then click Do not file again.`;
 async function graphItemFromUrl(url) {
   const id = "u!" + btoa(unescape(encodeURIComponent(url))).replace(/=+$/, "").replace(/\//g, "_").replace(/\+/g, "-");
   return gjson(`/shares/${id}/driveItem?$select=id,name,parentReference,createdDateTime`);
@@ -359,8 +437,10 @@ async function doNotFile() {
   $("r-dnf").disabled = true;
   try {
     show(out, "Marking as Do not file…", "muted");
-    await ensureCategory();
-    await mbxAsync((cb) => item.categories.addAsync([DNF_CATEGORY], cb));
+    try {
+      await ensureCategory().catch(() => {});   // try to create it; fall through to add either way
+      await mbxAsync((cb) => item.categories.addAsync([DNF_CATEGORY], cb));
+    } catch (e) { show(out, NOCAT_MSG, "bad"); return; }
     // cancel anything still queued
     for (const r of (await findRequests(key)).filter(r => r.Status === "Pending"))
       await gjson(`/sites/${siteId}/lists/${listIds.requests}/items/${r.itemId}/fields`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ Status: "Cancelled", Result: "Marked Do not file" }) });
@@ -427,6 +507,7 @@ if (!IS_AUTH_POPUP) Office.onReady(async () => {
       if (t) $("r-matter").value = t[1] + t[2];
       $("r-check").onclick = () => checkMatter("r-matter", "r-check-result", "r-file").catch(fail);
       $("r-matter").onkeydown = (e) => { if (e.key === "Enter") $("r-check").click(); };
+      $("r-matter").oninput = updateFileButton;
       $("r-file").onclick = () => fileEmail();
       $("r-dnf").onclick = () => doNotFile();
       renderAttachmentList();
