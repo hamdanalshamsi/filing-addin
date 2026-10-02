@@ -152,7 +152,12 @@ async function loadStatus() {
   const cats = item.categories ? await mbxAsync((cb) => item.categories.getAsync(cb)).catch(() => []) : [];
   const dnf = (cats || []).some(c => c.displayName === DNF_CATEGORY);
   let html = "";
-  const e = events[0];
+  // most recent meaningful event: a later failure/review never hides a successful filing
+  const lastFiled = log.filter(l => l.Status === "Filed").sort((x, y) => new Date(y.created) - new Date(x.created))[0];
+  const lastRemoved = log.filter(l => l.Status === "Removed").sort((x, y) => new Date(y.created) - new Date(x.created))[0];
+  let e = events[0];
+  if (lastFiled && !(lastRemoved && new Date(lastRemoved.created) > new Date(lastFiled.created)) && e && e.kind === "log" && e.l.Status !== "Filed")
+    e = { kind: "log", l: lastFiled };
   if (e && e.kind === "log") {
     const l = e.l, when = fmtWhen(l.created);
     if (l.Status === "Filed") html = `<div class="status-item ok">✓ Filed to <b>${esc(l.MatterNo)}</b> · ${esc(when)}${l.FolderPath ? ` · <a href="${esc(l.FolderPath)}" target="_blank" rel="noopener">open folder</a>` : ""}</div>`;
@@ -166,8 +171,8 @@ async function loadStatus() {
   if (dnf) html = `<div class="status-item warn">⛔ Marked Do not file</div>` + html;
   box.className = ""; box.innerHTML = html || `<span class="muted">Not filed yet.</span>`;
   // which attachments are already saved?
-  const latestFiled = log.filter(l => l.Status === "Filed").sort((x, y) => new Date(y.created) - new Date(x.created))[0];
-  const stillFiled = latestFiled && !(e && e.kind === "log" && e.l.Status === "Removed");
+  const latestFiled = lastFiled;
+  const stillFiled = latestFiled && !(lastRemoved && new Date(lastRemoved.created) > new Date(lastFiled.created));
   filedState = null;
   if (stillFiled) {
     const idx = await findIndex(latestFiled.MatterNo).catch(() => null);
@@ -243,8 +248,8 @@ function renderAttachmentList() {
     const kb = a.size ? (a.size >= 1048576 ? (a.size / 1048576).toFixed(1) + " MB" : Math.max(1, Math.round(a.size / 1024)) + " KB") : "";
     if (saved.has(a.id)) return `<div class="att saved"><span class="tick">✓</span> ${esc(a.name)} <span class="muted small">${kb} · saved</span></div>`;
     if (a.attachmentType === "cloud") return `<div class="att disabled"><span class="tick muted">–</span> ${esc(a.name)} <span class="muted small">cloud link · not saved</span></div>`;
-    const small = a.isInline && a.size < CFG.inlineSkipBytes;
-    return `<label class="chk att"><input type="checkbox" value="${esc(a.id)}" ${small ? "" : "checked"}> ${esc(a.name)} <span class="muted small">${kb}${small ? " · inline image" : ""}</span></label>`;
+    if (a.isInline) return `<label class="chk att"><input type="checkbox" value="${esc(a.id)}"> ${esc(a.name)} <span class="muted small">${kb} · image in email body (kept inside the .eml)</span></label>`;
+    return `<label class="chk att"><input type="checkbox" value="${esc(a.id)}" checked> ${esc(a.name)} <span class="muted small">${kb}</span></label>`;
   }).join("");
   box.querySelectorAll("input[type=checkbox]").forEach(c => c.onchange = updateFileButton);
   updateFileButton();
@@ -394,13 +399,30 @@ async function fileEmail() {
 const DNF_CATEGORY = "Do not file / Personal";
 async function ensureCategory() {
   const mc = Office.context.mailbox.masterCategories;
-  if (!mc) throw new Error("NOCAT");
-  const have = await mbxAsync((cb) => mc.getAsync(cb)).catch(() => []);
-  if ((have || []).some(c => c.displayName === DNF_CATEGORY)) return;
-  try { await mbxAsync((cb) => mc.addAsync([{ displayName: DNF_CATEGORY, color: Office.MailboxEnums.CategoryColor.Preset0 }], cb)); }
-  catch (e) { const err = new Error("NOCAT"); err.detail = e && (e.message || e.name); throw err; }
+  let detail = "";
+  if (mc) {
+    const have = await mbxAsync((cb) => mc.getAsync(cb)).catch(() => null);
+    if (have && have.some(c => c.displayName === DNF_CATEGORY)) return;
+    try { await mbxAsync((cb) => mc.addAsync([{ displayName: DNF_CATEGORY, color: Office.MailboxEnums.CategoryColor.Preset0 }], cb)); return; }
+    catch (e) { detail = (e && (e.message || e.name)) || String(e); }
+  } else detail = "masterCategories not available";
+  // fallback: create the category with Microsoft Graph (needs MailboxSettings.ReadWrite)
+  try {
+    const login = Office.context.mailbox.userProfile.emailAddress;
+    const acct = pca.getAllAccounts().find(x => (x.username || "").toLowerCase() === login.toLowerCase());
+    const req = { scopes: ["https://graph.microsoft.com/MailboxSettings.ReadWrite"], loginHint: login, account: acct };
+    let tk;
+    try { tk = (await pca.acquireTokenSilent(req)).accessToken; } catch (_) { tk = (await pca.acquireTokenPopup(req)).accessToken; }
+    const list = await (await fetch(G + "/me/outlook/masterCategories", { headers: { Authorization: "Bearer " + tk } })).json();
+    if ((list.value || []).some(c => c.displayName === DNF_CATEGORY)) return;
+    const r = await fetch(G + "/me/outlook/masterCategories", { method: "POST", headers: { Authorization: "Bearer " + tk, "Content-Type": "application/json" },
+      body: JSON.stringify({ displayName: DNF_CATEGORY, color: "preset0" }) });
+    if (r.ok || r.status === 409) { await new Promise(res => setTimeout(res, 1500)); return; }
+    detail += " | Graph " + r.status;
+  } catch (e) { detail += " | Graph: " + (e.errorCode || e.message || e); }
+  const err = new Error("NOCAT"); err.detail = detail; throw err;
 }
-const NOCAT_MSG = `Outlook didn't let the add-in create the "${DNF_CATEGORY}" category. Create it once yourself: in Outlook, <b>Categorize → All categories → New</b>, name it exactly <b>${DNF_CATEGORY}</b>, then click Do not file again.`;
+const NOCAT_MSG = `Couldn't create the "${DNF_CATEGORY}" category in your Outlook.`;
 async function graphItemFromUrl(url) {
   const id = "u!" + btoa(unescape(encodeURIComponent(url))).replace(/=+$/, "").replace(/\//g, "_").replace(/\+/g, "-");
   return gjson(`/shares/${id}/driveItem?$select=id,name,parentReference,createdDateTime`);
@@ -437,10 +459,10 @@ async function doNotFile() {
   $("r-dnf").disabled = true;
   try {
     show(out, "Marking as Do not file…", "muted");
-    try {
-      await ensureCategory().catch(() => {});   // try to create it; fall through to add either way
-      await mbxAsync((cb) => item.categories.addAsync([DNF_CATEGORY], cb));
-    } catch (e) { show(out, NOCAT_MSG, "bad"); return; }
+    let catErr = "";
+    try { await ensureCategory(); } catch (e) { catErr = e.detail || e.message; }
+    try { await mbxAsync((cb) => item.categories.addAsync([DNF_CATEGORY], cb)); }
+    catch (e) { show(out, `${NOCAT_MSG}<div class="muted small">${esc(catErr || (e && e.message) || "")}</div>`, "bad"); return; }
     // cancel anything still queued
     for (const r of (await findRequests(key)).filter(r => r.Status === "Pending"))
       await gjson(`/sites/${siteId}/lists/${listIds.requests}/items/${r.itemId}/fields`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ Status: "Cancelled", Result: "Marked Do not file" }) });
