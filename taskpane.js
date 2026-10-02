@@ -56,9 +56,17 @@ async function token(interactive) {
   }
 }
 async function gfetch(url, opt = {}) {
-  const t = await token(false);
-  const headers = { Authorization: "Bearer " + t, ...(opt.headers || {}) };
-  const r = await fetch(url.startsWith("http") ? url : G + url, { ...opt, headers });
+  let r;
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const t = await token(false);
+    const headers = { Authorization: "Bearer " + t, ...(opt.headers || {}) };
+    r = await fetch(url.startsWith("http") ? url : G + url, { ...opt, headers });
+    if (r.status !== 429 && r.status !== 503) break;
+    const ra = parseInt(r.headers.get("Retry-After") || "", 10);
+    const wait = Math.min(isNaN(ra) ? 2 ** attempt * 1500 : ra * 1000, 15000);
+    const l = $("loading"); if (l && !l.hidden) l.textContent = "Microsoft is busy – retrying…";
+    await new Promise(res => setTimeout(res, wait));
+  }
   if (!r.ok && r.status !== 404) {
     let msg = r.status + " " + r.statusText;
     try { const j = await r.json(); msg += " – " + (j.error && j.error.message || ""); } catch (_) {}
@@ -70,6 +78,16 @@ const gjson = async (url, opt) => { const r = await gfetch(url, opt); return r.s
 
 /* ---------- SharePoint lookups ---------- */
 async function initSite() {
+  try {
+    const c = JSON.parse(localStorage.getItem("hasFilingSite") || "null");
+    if (c && c.exp > Date.now() && c.siteId && c.inboxDriveId && c.listIds && c.listIds.requests) {
+      siteId = c.siteId; listIds = c.listIds; inboxDriveId = c.inboxDriveId; return;
+    }
+  } catch (_) {}
+  await loadSite();
+  try { localStorage.setItem("hasFilingSite", JSON.stringify({ siteId, listIds, inboxDriveId, exp: Date.now() + 24 * 3600 * 1000 })); } catch (_) {}
+}
+async function loadSite() {
   siteId = (await gjson(`/sites/${CFG.sitePath}?$select=id`)).id;
   const lists = (await gjson(`/sites/${siteId}/lists?$select=id,displayName&$top=100`)).value;
   for (const [k, name] of Object.entries(CFG.lists)) listIds[k] = (lists.find(l => l.displayName === name) || {}).id;
@@ -77,15 +95,27 @@ async function initSite() {
   inboxDriveId = (drives.find(d => d.name === CFG.inboxLibrary) || {}).id;
 }
 const PREFER = { headers: { Prefer: "HonorNonIndexedQueriesWarningMayFailRandomly" } };
-async function findIndex(matter) {
+const memo = new Map();
+function memoize(key, ms, fn) {
+  const hit = memo.get(key);
+  if (hit && hit.exp > Date.now()) return hit.p;
+  const p = fn().catch(e => { memo.delete(key); throw e; });
+  memo.set(key, { p, exp: Date.now() + ms });
+  return p;
+}
+function forget(prefix) { for (const k of [...memo.keys()]) if (k.startsWith(prefix)) memo.delete(k); }
+async function findIndex(matter) { return memoize("idx:" + matter, 5 * 60000, () => findIndexRaw(matter)); }
+async function findIndexRaw(matter) {
   const j = await gjson(`/sites/${siteId}/lists/${listIds.index}/items?expand=fields&$filter=fields/Title eq '${odataStr(matter)}'&$top=1`, PREFER);
   return j && j.value[0] ? j.value[0].fields : null;
 }
-async function findLog(messageKey) {
-  const j = await gjson(`/sites/${siteId}/lists/${listIds.log}/items?expand=fields&$filter=fields/MessageKey eq '${odataStr(messageKey)}'&$orderby=createdDateTime desc&$top=10`, PREFER);
+async function findLog(messageKey) { return memoize("log:" + messageKey, 8000, () => findLogRaw(messageKey)); }
+async function findLogRaw(messageKey) {
+  const j = await gjson(`/sites/${siteId}/lists/${listIds.log}/items?expand=fields&$filter=fields/MessageKey eq '${odataStr(messageKey)}'&$top=20`, PREFER);
   return j ? j.value.map(v => ({ ...v.fields, itemId: v.id, created: v.createdDateTime })) : [];
 }
-async function findRequests(messageKey) {
+async function findRequests(messageKey) { return memoize("req:" + messageKey, 8000, () => findRequestsRaw(messageKey)); }
+async function findRequestsRaw(messageKey) {
   const j = await gjson(`/sites/${siteId}/lists/${listIds.requests}/items?expand=fields&$filter=fields/MessageKey eq '${odataStr(messageKey)}'&$top=10`, PREFER);
   return j ? j.value.map(v => ({ ...v.fields, itemId: v.id, created: v.createdDateTime })) : [];
 }
@@ -139,7 +169,8 @@ async function addMarker(marker) {
 /* ---------- read: status ---------- */
 let filedState = null;   // { matter, row, idx, saved:Set(attachmentId) } for the latest Filed row
 const fmtWhen = (d) => new Date(d).toLocaleString("en-GB", { timeZone: CFG.timeZone, dateStyle: "medium", timeStyle: "short" });
-async function loadStatus() {
+async function loadStatus(fresh) {
+  if (fresh) { forget("log:"); forget("req:"); }
   const item = Office.context.mailbox.item;
   const key = item.internetMessageId;
   const box = $("status");
@@ -169,6 +200,7 @@ async function loadStatus() {
                                     : `<div class="status-item bad">Filing to ${esc(e.r.MatterTag || e.r.MatterNo)} failed: ${esc(e.r.Result || "")}</div>`;
   }
   if (dnf) html = `<div class="status-item warn">⛔ Marked Do not file</div>` + html;
+  setDnfUi(dnf);
   box.className = ""; box.innerHTML = html || `<span class="muted">Not filed yet.</span>`;
   // which attachments are already saved?
   const latestFiled = lastFiled;
@@ -318,7 +350,7 @@ function pollStatus(key) {
   pollTimer = setInterval(async () => {
     n++;
     try {
-      await loadStatus();
+      await loadStatus(true);
       const pending = (await findRequests(key)).some(r => r.Status === "Pending");
       if (!pending || n > 40) clearInterval(pollTimer);
     } catch (_) { clearInterval(pollTimer); }
@@ -331,6 +363,7 @@ async function fileEmail() {
   const item = Office.context.mailbox.item;
   const key = item.internetMessageId;
   btn.disabled = true;
+  if (await hasDnf()) { try { await removeDnf(); show($("r-dnf-result"), "Do not file mark removed because you filed this email.", "muted"); setDnfUi(false); } catch (_) {} }
   // already filed: only save the extra attachments that were ticked
   if (filedState) {
     try {
@@ -379,7 +412,7 @@ async function fileEmail() {
       try {
         await fileDirect(idx, m, meta, parts, out);
         show(out, `✓ Filed to ${esc(m.tag)} now – ${parts.atts.length} attachment(s)${skippedNote}. <a href="${esc(idx.FolderPath)}" target="_blank" rel="noopener">Open folder</a>`, "ok");
-        loadStatus().catch(fail);
+        loadStatus(true).catch(fail);
         return;
       } catch (e) {
         if (e.status !== 401 && e.status !== 403 && e.status !== 404) throw e;   // no access → use the queue
@@ -387,7 +420,7 @@ async function fileEmail() {
     }
     await fileQueued(m, meta, parts, out);
     show(out, `✓ Sent for filing to ${esc(m.tag)} – ${parts.atts.length} attachment(s)${skippedNote}. The status above updates automatically (usually within 5 minutes).`, "ok");
-    loadStatus().catch(fail);
+    loadStatus(true).catch(fail);
     pollStatus(key);
   } catch (e) {
     show(out, "Failed: " + esc(e.message || e), "bad");
@@ -467,7 +500,7 @@ async function doNotFile() {
     for (const r of (await findRequests(key)).filter(r => r.Status === "Pending"))
       await gjson(`/sites/${siteId}/lists/${listIds.requests}/items/${r.itemId}/fields`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ Status: "Cancelled", Result: "Marked Do not file" }) });
     const filed = (await findLog(key)).filter(l => l.Status === "Filed");
-    if (!filed.length) { show(out, "✓ Marked Do not file – this email will not be filed.", "ok"); loadStatus().catch(fail); return; }
+    if (!filed.length) { show(out, "✓ Marked Do not file – this email will not be filed.", "ok"); loadStatus(true).catch(fail); return; }
     const matters = [...new Set(filed.map(f => f.MatterNo))].join(", ");
     show(out, `✓ Marked Do not file. This email is already filed to <b>${esc(matters)}</b>. Remove the saved copy from the matter folder?
       <div class="row" style="margin-top:6px"><button id="rm-yes" class="secondary">Yes, remove it</button><button id="rm-no" class="secondary">Keep it</button></div>
@@ -482,10 +515,39 @@ async function doNotFile() {
       } catch (e) {
         show(out, (e.status === 403 || e.status === 401) ? "You don't have edit access to that matter folder, so the copy couldn't be removed. Please ask IT to remove it." : "Remove failed: " + esc(e.message || e), "bad");
       }
-      loadStatus().catch(fail);
+      loadStatus(true).catch(fail);
     };
   } catch (e) { show(out, "Failed: " + esc(e.message || e), "bad"); }
   finally { $("r-dnf").disabled = false; }
+}
+
+
+function setDnfUi(marked) {
+  const btn = $("r-dnf"), p = $("r-dnf-desc");
+  if (!btn) return;
+  btn.dataset.marked = marked ? "1" : "";
+  btn.textContent = marked ? "Remove Do not file" : "Do not file";
+  if (p) p.textContent = marked
+    ? "This email is marked Do not file. Remove the mark to allow filing it to a matter."
+    : "For confidential or personal emails. Stops this email being filed; if it was already filed you can remove the saved copy.";
+}
+async function hasDnf() {
+  const cats = await mbxAsync((cb) => Office.context.mailbox.item.categories.getAsync(cb)).catch(() => []);
+  return (cats || []).some(c => c.displayName === DNF_CATEGORY);
+}
+async function removeDnf() {
+  await mbxAsync((cb) => Office.context.mailbox.item.categories.removeAsync([DNF_CATEGORY], cb));
+}
+async function onDnfClick() {
+  const out = $("r-dnf-result");
+  if ($("r-dnf").dataset.marked) {
+    $("r-dnf").disabled = true;
+    try { await removeDnf(); show(out, "✓ Do not file removed – you can now file this email to a matter.", "ok"); await loadStatus(true); }
+    catch (e) { show(out, "Failed: " + esc(e.message || e), "bad"); }
+    finally { $("r-dnf").disabled = false; }
+    return;
+  }
+  return doNotFile();
 }
 
 /* ---------- start ---------- */
@@ -531,9 +593,9 @@ if (!IS_AUTH_POPUP) Office.onReady(async () => {
       $("r-matter").onkeydown = (e) => { if (e.key === "Enter") $("r-check").click(); };
       $("r-matter").oninput = updateFileButton;
       $("r-file").onclick = () => fileEmail();
-      $("r-dnf").onclick = () => doNotFile();
+      $("r-dnf").onclick = () => onDnfClick();
       renderAttachmentList();
-      loadStatus().catch(fail);
+      loadStatus(true).catch(fail);
       if (Office.context.mailbox.addHandlerAsync && Office.EventType.ItemChanged)
         Office.context.mailbox.addHandlerAsync(Office.EventType.ItemChanged, () => location.reload());
     }
