@@ -83,11 +83,11 @@ async function findIndex(matter) {
 }
 async function findLog(messageKey) {
   const j = await gjson(`/sites/${siteId}/lists/${listIds.log}/items?expand=fields&$filter=fields/MessageKey eq '${odataStr(messageKey)}'&$orderby=createdDateTime desc&$top=10`, PREFER);
-  return j ? j.value.map(v => ({ ...v.fields, created: v.createdDateTime })) : [];
+  return j ? j.value.map(v => ({ ...v.fields, itemId: v.id, created: v.createdDateTime })) : [];
 }
 async function findRequests(messageKey) {
   const j = await gjson(`/sites/${siteId}/lists/${listIds.requests}/items?expand=fields&$filter=fields/MessageKey eq '${odataStr(messageKey)}'&$top=10`, PREFER);
-  return j ? j.value.map(v => ({ ...v.fields, created: v.createdDateTime })) : [];
+  return j ? j.value.map(v => ({ ...v.fields, itemId: v.id, created: v.createdDateTime })) : [];
 }
 
 /* ---------- matter input ---------- */
@@ -148,10 +148,13 @@ async function loadStatus() {
     const when = new Date(l.created).toLocaleString("en-GB", { timeZone: CFG.timeZone, dateStyle: "medium", timeStyle: "short" });
     if (l.Status === "Filed") rows.push(`<div class="status-item ok">✓ Filed to <b>${esc(l.MatterNo)}</b> · ${esc(when)}${l.FolderPath ? ` · <a href="${esc(l.FolderPath)}" target="_blank" rel="noopener">open folder</a>` : ""}</div>`);
     else if (l.Status === "Review") rows.push(`<div class="status-item warn">In review${l.MatterNo ? " (" + esc(l.MatterNo) + ")" : ""} – ${esc(l.Error || "")} · ${esc(when)}</div>`);
+    else if (l.Status === "Removed") rows.push(`<div class="status-item muted">Removed from ${esc(l.MatterNo)} · ${esc(when)}</div>`);
     else rows.push(`<div class="status-item bad">${esc(l.Status)}${l.MatterNo ? " (" + esc(l.MatterNo) + ")" : ""} · ${esc(when)}</div>`);
   }
   for (const r of reqs.filter(r => r.Status === "Pending")) rows.push(`<div class="status-item muted">⏳ Queued for ${esc(r.MatterTag || r.MatterNo)} – will be filed within ~5 minutes</div>`);
   for (const r of reqs.filter(r => r.Status === "Failed")) rows.push(`<div class="status-item bad">Add-in request failed for ${esc(r.MatterTag || r.MatterNo)}: ${esc(r.Result || "")}</div>`);
+  const cats = Office.context.mailbox.item.categories ? await mbxAsync((cb) => Office.context.mailbox.item.categories.getAsync(cb)).catch(() => []) : [];
+  if ((cats || []).some(c => c.displayName === DNF_CATEGORY)) rows.unshift(`<div class="status-item warn">⛔ Marked Do not file</div>`);
   box.className = ""; box.innerHTML = rows.length ? rows.join("") : `<span class="muted">Not filed yet.</span>`;
 }
 
@@ -188,14 +191,29 @@ async function uploadTo(base, name, bytes) {
 }
 const inboxBase = (path) => `/drives/${inboxDriveId}/root:/${path.split("/").map(encodeURIComponent).join("/")}`;
 
-async function collectParts(item, withAtt, out) {
+function selectedAttachmentIds() {
+  return [...document.querySelectorAll('#r-att-list input[type=checkbox]:checked')].map(c => c.value);
+}
+function renderAttachmentList() {
+  const box = $("r-att-list"), item = Office.context.mailbox.item;
+  const list = (item.attachments || []);
+  if (!list.length) { box.innerHTML = '<span class="muted small">No attachments.</span>'; return; }
+  box.innerHTML = list.map((a, i) => {
+    const kb = a.size ? (a.size >= 1048576 ? (a.size / 1048576).toFixed(1) + " MB" : Math.max(1, Math.round(a.size / 1024)) + " KB") : "";
+    if (a.attachmentType === "cloud") return `<label class="chk att disabled"><input type="checkbox" disabled> ${esc(a.name)} <span class="muted small">(cloud link – not saved)</span></label>`;
+    const small = a.isInline && a.size < CFG.inlineSkipBytes;
+    return `<label class="chk att"><input type="checkbox" value="${esc(a.id)}" ${small ? "" : "checked"}> ${esc(a.name)} <span class="muted small">${kb}${small ? " · inline image" : ""}</span></label>`;
+  }).join("") + `<div class="row small"><a href="#" id="att-all">Select all</a> · <a href="#" id="att-none">None</a></div>`;
+  $("att-all").onclick = (e) => { e.preventDefault(); box.querySelectorAll("input:not([disabled])").forEach(c => c.checked = true); };
+  $("att-none").onclick = (e) => { e.preventDefault(); box.querySelectorAll("input").forEach(c => c.checked = false); };
+}
+async function collectParts(item, wantedIds, out) {
   show(out, "Reading email…", "muted");
   const eml = b64ToBytes(await mbxAsync((cb) => item.getAsFileAsync(cb)));
   const atts = []; let skipped = 0;
-  if (withAtt) {
+  {
     for (const a of item.attachments || []) {
-      if (a.attachmentType === "cloud") { skipped++; continue; }
-      if (a.isInline && a.size < CFG.inlineSkipBytes) continue;
+      if (!wantedIds.includes(a.id)) { if (a.attachmentType === "cloud") skipped++; continue; }
       const c = await new Promise((res, rej) => item.getAttachmentContentAsync(a.id, (r) => r.status === Office.AsyncResultStatus.Succeeded ? res(r.value) : rej(r.error)));
       let bytes, name = cleanName(a.name) || "attachment";
       if (c.format === "base64") bytes = b64ToBytes(c.content);
@@ -272,7 +290,7 @@ async function fileEmail() {
       emlName: `${base} – ${st}.eml`,
       stamped: (n) => { const i = n.lastIndexOf("."); return i > 0 ? `${n.slice(0, i)} – ${st}${n.slice(i)}` : `${n} – ${st}`; },
     };
-    const parts = await collectParts(item, $("r-att").checked, out);
+    const parts = await collectParts(item, selectedAttachmentIds(), out);
     const skippedNote = parts.skipped ? `, ${parts.skipped} cloud link(s) skipped` : "";
 
     const idx = await findIndex(m.parent);
@@ -293,6 +311,79 @@ async function fileEmail() {
   } catch (e) {
     show(out, "Failed: " + esc(e.message || e), "bad");
   } finally { btn.disabled = false; }
+}
+
+
+/* ---------- read: do not file / remove ---------- */
+const DNF_CATEGORY = "Do not file / Personal";
+async function ensureCategory() {
+  const mc = Office.context.mailbox.masterCategories;
+  if (!mc) return;
+  const have = await mbxAsync((cb) => mc.getAsync(cb)).catch(() => []);
+  if (!(have || []).some(c => c.displayName === DNF_CATEGORY))
+    await mbxAsync((cb) => mc.addAsync([{ displayName: DNF_CATEGORY, color: Office.MailboxEnums.CategoryColor.Preset0 }], cb)).catch(() => {});
+}
+async function graphItemFromUrl(url) {
+  const id = "u!" + btoa(unescape(encodeURIComponent(url))).replace(/=+$/, "").replace(/\//g, "_").replace(/\+/g, "-");
+  return gjson(`/shares/${id}/driveItem?$select=id,name,parentReference,createdDateTime`);
+}
+async function removeFiled(rows, out) {
+  const item = Office.context.mailbox.item;
+  let removed = 0, missing = 0;
+  for (const l of rows) {
+    const created = new Date(l.created).getTime();
+    if (l.EmlUrl) {
+      const di = await graphItemFromUrl(l.EmlUrl);
+      if (di) { await gfetch(`/drives/${di.parentReference.driveId}/items/${di.id}`, { method: "DELETE" }); removed++; } else missing++;
+    }
+    // attachments saved for this email: same names (or dated/renamed variants), saved within 20 min of the filing
+    const idx = await findIndex(l.MatterNo);
+    if (idx && idx.DriveId && idx.AttachmentsFolderId) {
+      const kids = (await gjson(`/drives/${idx.DriveId}/items/${idx.AttachmentsFolderId}/children?$select=id,name,createdDateTime&$top=999`) || { value: [] }).value;
+      const stems = (item.attachments || []).map(a => { const n = cleanName(a.name) || "attachment"; const i = n.lastIndexOf("."); return [i > 0 ? n.slice(0, i) : n, i > 0 ? n.slice(i).toLowerCase() : ""]; });
+      for (const k of kids) {
+        if (Math.abs(new Date(k.createdDateTime).getTime() - created) > 20 * 60000) continue;
+        const kn = k.name.toLowerCase();
+        if (stems.some(([st, ext]) => kn.startsWith(st.toLowerCase()) && (!ext || kn.endsWith(ext)))) {
+          await gfetch(`/drives/${idx.DriveId}/items/${k.id}`, { method: "DELETE" }); removed++;
+        }
+      }
+    }
+    await gjson(`/sites/${siteId}/lists/${listIds.log}/items/${l.itemId}/fields`, { method: "PATCH", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ Status: "Removed", Error: `Removed via add-in by ${Office.context.mailbox.userProfile.emailAddress}` }) });
+  }
+  return { removed, missing };
+}
+async function doNotFile() {
+  const out = $("r-dnf-result"), item = Office.context.mailbox.item, key = item.internetMessageId;
+  $("r-dnf").disabled = true;
+  try {
+    show(out, "Marking as Do not file…", "muted");
+    await ensureCategory();
+    await mbxAsync((cb) => item.categories.addAsync([DNF_CATEGORY], cb));
+    // cancel anything still queued
+    for (const r of (await findRequests(key)).filter(r => r.Status === "Pending"))
+      await gjson(`/sites/${siteId}/lists/${listIds.requests}/items/${r.itemId}/fields`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ Status: "Cancelled", Result: "Marked Do not file" }) });
+    const filed = (await findLog(key)).filter(l => l.Status === "Filed");
+    if (!filed.length) { show(out, "✓ Marked Do not file – this email will not be filed.", "ok"); loadStatus().catch(fail); return; }
+    const matters = [...new Set(filed.map(f => f.MatterNo))].join(", ");
+    show(out, `✓ Marked Do not file. This email is already filed to <b>${esc(matters)}</b>. Remove the saved copy from the matter folder?
+      <div class="row" style="margin-top:6px"><button id="rm-yes" class="secondary">Yes, remove it</button><button id="rm-no" class="secondary">Keep it</button></div>
+      <div class="muted small">Removed files go to the OneDrive recycle bin and can be restored.</div>`, "warn");
+    $("rm-no").onclick = () => show(out, "✓ Marked Do not file. The copy already filed was kept.", "ok");
+    $("rm-yes").onclick = async () => {
+      $("rm-yes").disabled = $("rm-no").disabled = true;
+      try {
+        show(out, "Removing…", "muted");
+        const r = await removeFiled(filed, out);
+        show(out, `✓ Removed ${r.removed} file(s) from ${esc(matters)}${r.missing ? ` (${r.missing} already gone)` : ""}. Marked Do not file.`, "ok");
+      } catch (e) {
+        show(out, (e.status === 403 || e.status === 401) ? "You don't have edit access to that matter folder, so the copy couldn't be removed. Please ask IT to remove it." : "Remove failed: " + esc(e.message || e), "bad");
+      }
+      loadStatus().catch(fail);
+    };
+  } catch (e) { show(out, "Failed: " + esc(e.message || e), "bad"); }
+  finally { $("r-dnf").disabled = false; }
 }
 
 /* ---------- start ---------- */
@@ -337,6 +428,8 @@ if (!IS_AUTH_POPUP) Office.onReady(async () => {
       $("r-check").onclick = () => checkMatter("r-matter", "r-check-result", "r-file").catch(fail);
       $("r-matter").onkeydown = (e) => { if (e.key === "Enter") $("r-check").click(); };
       $("r-file").onclick = () => fileEmail();
+      $("r-dnf").onclick = () => doNotFile();
+      renderAttachmentList();
       loadStatus().catch(fail);
       if (Office.context.mailbox.addHandlerAsync && Office.EventType.ItemChanged)
         Office.context.mailbox.addHandlerAsync(Office.EventType.ItemChanged, () => location.reload());

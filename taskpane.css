@@ -1,8 +1,8 @@
-:root{--ink:#1b2430;--muted:#5f6b7a;--line:#d9dee5;--bg:#ffffff;--card:#f6f8fa;--brand:#1f3a5f;--ok:#1a7f37;--warn:#9a6700;--bad:#cf222e}
-@media (prefers-color-scheme: dark){:root{--ink:#e6edf3;--muted:#9aa6b2;--line:#30363d;--bg:#0d1117;--card:#161b22;--brand:#6ea8fe;--ok:#3fb950;--warn:#d29922;--bad:#f85149}}
+:root{--ink:#3A3F46;--muted:#6b7178;--line:#dde1e5;--bg:#ffffff;--card:#f5f7f8;--brand:#14B4A0;--head:#3A3F46;--ok:#1a7f37;--warn:#9a6700;--bad:#cf222e}
+@media (prefers-color-scheme: dark){:root{--ink:#e6edf3;--muted:#9aa6b2;--line:#30363d;--bg:#0d1117;--card:#161b22;--brand:#14B4A0;--head:#2a2e33;--ok:#3fb950;--warn:#d29922;--bad:#f85149}}
 *{box-sizing:border-box}
 body{margin:0;font:14px/1.45 "Segoe UI",system-ui,-apple-system,sans-serif;color:var(--ink);background:var(--bg)}
-header{display:flex;align-items:center;gap:8px;padding:12px 14px;border-bottom:1px solid var(--line)}
+header{display:flex;align-items:center;gap:8px;padding:12px 14px;background:var(--head);color:#fff;border-bottom:3px solid var(--brand)}
 header h1{font-size:16px;margin:0;font-weight:600}
 main{padding:12px 14px}
 .card{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:12px;margin-bottom:12px}
@@ -12,7 +12,7 @@ label.chk{display:flex;gap:6px;align-items:center;margin:10px 0;color:var(--ink)
 .row{display:flex;gap:8px}
 input[type=text],input:not([type]){flex:1;min-width:0;padding:7px 9px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--ink);font:inherit}
 button{font:inherit;padding:7px 12px;border-radius:6px;border:1px solid var(--line);cursor:pointer;background:var(--bg);color:var(--ink)}
-button.primary{background:var(--brand);border-color:var(--brand);color:#fff;width:100%;margin-top:6px}
+button.primary{background:var(--brand);border-color:var(--brand);color:#fff;font-weight:600;width:100%;margin-top:6px}
 button:disabled{opacity:.5;cursor:default}
 .hint{font-size:12px;margin-top:6px;min-height:1em;word-break:break-word}
 .ok{color:var(--ok)}.warn{color:var(--warn)}.bad{color:var(--bad)}
@@ -22,3 +22,9 @@ button:disabled{opacity:.5;cursor:default}
 .status-item:first-child{border-top:0}
 a{color:var(--brand)}
 footer{padding:8px 14px;border-top:1px solid var(--line)}
+.att-list{margin:2px 0 6px}.chk.att{margin:4px 0;font-size:13px;align-items:flex-start}.chk.att.disabled{opacity:.6}
+.row.small{font-size:12px;gap:4px;margin-top:4px}.row button.secondary{flex:1}
+.card h2{border-left:3px solid var(--brand);padding-left:8px}
+button.secondary:hover{border-color:var(--brand)}
+input:focus{outline:2px solid var(--brand);outline-offset:0}
+input[type=checkbox]{accent-color:var(--brand)}

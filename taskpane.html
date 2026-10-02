@@ -39,9 +39,17 @@
         <button id="r-check" class="secondary">Check</button>
       </div>
       <div id="r-check-result" class="hint"></div>
-      <label class="chk"><input type="checkbox" id="r-att" checked> Include attachments</label>
+      <label>Attachments to save</label>
+      <div id="r-att-list" class="att-list"></div>
       <button id="r-file" class="primary" disabled>File to matter</button>
       <div id="r-file-result" class="hint"></div>
+    </div>
+
+    <div class="card">
+      <h2>Do not file</h2>
+      <p class="muted small">For confidential or personal emails. Stops this email being filed; if it was already filed you can remove the saved copy.</p>
+      <button id="r-dnf" class="secondary">Do not file</button>
+      <div id="r-dnf-result" class="hint"></div>
     </div>
   </section>
 
@@ -73,7 +81,7 @@
   <div id="err" class="error" hidden></div>
 </main>
 
-<footer class="muted small">Signed in as <span id="who">…</span><br><span id="diag"></span> · v1.1</footer>
+<footer class="muted small">Signed in as <span id="who">…</span><br><span id="diag"></span> · v1.2</footer>
 <script src="taskpane.js"></script>
 </body>
 </html>
