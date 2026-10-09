@@ -228,7 +228,7 @@ function matchSavedAttachments(kids, filedAt, alsoRecent) {
   for (const a of Office.context.mailbox.item.attachments || []) {
     const n = (cleanName(a.name) || "attachment").toLowerCase(), i = n.lastIndexOf(".");
     const stem = i > 0 ? n.slice(0, i) : n, ext = i > 0 ? n.slice(i) : "";
-    if (kids.some(k => { const kn = k.name.toLowerCase(); const kt = new Date(k.createdDateTime).getTime();
+    if (kids.some(k => { const kn = k.name.toLowerCase().replace(/^\d{4}-\d{2}-\d{2} \d{4} - /, ""); const kt = new Date(k.createdDateTime).getTime();
           return kn.startsWith(stem) && (!ext || kn.endsWith(ext)) && (Math.abs(kt - t0) < 20 * 60000 || (alsoRecent && kt >= alsoRecent)); }))
       out.push(a.id);
   }
@@ -376,8 +376,7 @@ async function fileEmail() {
       let n = 0;
       for (const a of parts.atts) {
         show(out, `Saving attachment ${++n} of ${parts.atts.length}…`, "muted");
-        const i = a.name.lastIndexOf(".");
-        const nm = i > 0 ? `${a.name.slice(0, i)} – ${st}${a.name.slice(i)}` : `${a.name} – ${st}`;
+        const nm = `${st} - ${a.name}`;
         await uploadTo(`/drives/${idx.DriveId}/items/${idx.AttachmentsFolderId}`, nm, a.bytes);
       }
       for (const id of ids) filedState.saved.add(id);
@@ -401,8 +400,8 @@ async function fileEmail() {
     const st = stamp(received);
     const meta = {
       key, subject: item.subject || "", from: item.from ? item.from.emailAddress : "", sentIso: received.toISOString(),
-      emlName: `${base} – ${st}.eml`,
-      stamped: (n) => { const i = n.lastIndexOf("."); return i > 0 ? `${n.slice(0, i)} – ${st}${n.slice(i)}` : `${n} – ${st}`; },
+      emlName: `${st} - ${base}.eml`,
+      stamped: (n) => `${st} - ${n}`,
     };
     const parts = await collectParts(item, selectedAttachmentIds(), out);
     const skippedNote = parts.skipped ? `, ${parts.skipped} cloud link(s) skipped` : "";
@@ -585,6 +584,7 @@ if (!IS_AUTH_POPUP) Office.onReady(async () => {
       $("c-pers").onclick = () => addMarker("[Personal]").catch(fail);
       // prefill from an existing tag in the subject
       subjAsync().then(s => { const t = [...s.matchAll(TAG_RE)][0]; if (t) $("c-matter").value = t[1] + t[2]; }).catch(() => {});
+      try { $("c-matter").focus(); } catch (e) {}
     } else {
       $("read").hidden = false;
       const t = [...String(Office.context.mailbox.item.subject || "").matchAll(TAG_RE)][0];
