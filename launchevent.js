@@ -33,10 +33,31 @@ function hasGet(field, cb) {
   } catch (e) { cb(null); }
 }
 
+var HAS_PROMPT = {
+  allowEvent: false,
+  errorMessage: "This email is not tagged to a matter. Do you want to add it to a matter? " +
+    "Click \"Add to matter\" to add the matter tag (or mark it Confidential / Personal), then click Send again. " +
+    "Or click \"Send anyway\" to send without a tag.",
+  cancelLabel: "Add to matter",
+  commandId: "hasComposeButton"
+};
+
 function onMessageSendHandler(event) {
-  var item = Office.context.mailbox.item;
   var done = false;
-  function finish(opts) { if (!done) { done = true; event.completed(opts); } }
+  function finish(opts) {
+    if (done) return;
+    done = true;
+    try { event.completed(opts); }
+    catch (e) { try { event.completed({ allowEvent: opts.allowEvent, errorMessage: opts.errorMessage }); } catch (e2) {} }
+  }
+  // never leave Outlook waiting: after 4 s decide with what we know
+  setTimeout(function () { finish(HAS_PROMPT); }, 4000);
+  try { hasCheck(event, finish); }
+  catch (e) { console.log("[HAS] error", e); finish(HAS_PROMPT); }
+}
+
+function hasCheck(event, finish) {
+  var item = Office.context.mailbox.item;
 
   hasGet(item.subject, function (subject) {
     subject = subject || "";
@@ -63,20 +84,15 @@ function onMessageSendHandler(event) {
 
     function decide() {
       if (!external) { finish({ allowEvent: true }); return; }
-      finish({
-        allowEvent: false,
-        errorMessage:
-          "This email is not tagged to a matter. Do you want to add it to a matter?\n\n" +
-          "Click \"Add to matter\" to add the matter tag (or mark it Confidential / Personal), then click Send again. " +
-          "Or click \"Send anyway\" to send without a tag.",
-        cancelLabel: "Add to matter",
-        commandId: "hasComposeButton"
-      });
+      finish(HAS_PROMPT);
     }
   });
 }
 
-// Register the handler (required for every Outlook runtime)
-if (typeof Office !== "undefined" && Office.actions && Office.actions.associate) {
-  Office.actions.associate("onMessageSendHandler", onMessageSendHandler);
+// Register the handler now and again once Office is ready (new Outlook / web need the second call)
+function hasRegister() {
+  try { Office.actions.associate("onMessageSendHandler", onMessageSendHandler); }
+  catch (e) { console.log("[HAS] associate failed", e); }
 }
+hasRegister();
+try { if (Office.onReady) Office.onReady(function () { hasRegister(); }); } catch (e) {}
