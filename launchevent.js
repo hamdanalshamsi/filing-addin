@@ -33,6 +33,52 @@ function hasGet(field, cb) {
   } catch (e) { cb(null); }
 }
 
+/* ---- conversation -> matter memory (same format as taskpane.js) ---- */
+function hasImul(a, b) {
+  if (Math.imul) return Math.imul(a, b);
+  var ah = (a >>> 16) & 0xffff, al = a & 0xffff, bh = (b >>> 16) & 0xffff, bl = b & 0xffff;
+  return ((al * bl) + (((ah * bl + al * bh) << 16) >>> 0) | 0);
+}
+function hasHex8(n) { var h = (n >>> 0).toString(16); while (h.length < 8) h = "0" + h; return h; }
+function hasConvKey(id) {
+  if (!id) return "";
+  var a = 0x811c9dc5, b = 0x01000193 ^ 0x5bd1e995;
+  for (var i = 0; i < id.length; i++) { var c = id.charCodeAt(i); a = hasImul(a ^ c, 16777619) >>> 0; b = hasImul(b ^ c, 2246822519) >>> 0; }
+  return hasHex8(a) + hasHex8(b);
+}
+function hasConvTag(convId) {
+  try {
+    var m = Office.context.roamingSettings.get("hasConv") || {};
+    var k = hasConvKey(convId);
+    return k && m[k] ? String(m[k]) : "";
+  } catch (e) { return ""; }
+}
+function hasWithTag(subject, tag) {
+  var s = String(subject || "").replace(/\[\s*\d{6}[A-Za-z]{0,2}\s*\]/g, "").replace(/\s{2,}/g, " ").replace(/^\s+|\s+$/g, "");
+  var m = s.match(/^((re|fw|fwd|aw)\s*:\s*)+/i);
+  var prefix = m ? m[0] : "";
+  return (prefix + "[" + tag + "] " + s.slice(prefix.length)).replace(/\s+$/, "");
+}
+function hasConvId(item) { try { return item.conversationId || ""; } catch (e) { return ""; } }
+
+/* ---- OnNewMessageCompose: reply / forward of a filed conversation gets its tag straight away ---- */
+function onNewComposeHandler(event) {
+  var done = false;
+  function finish() { if (!done) { done = true; try { event.completed(); } catch (e) {} } }
+  setTimeout(finish, 4000);
+  try {
+    var item = Office.context.mailbox.item;
+    var tag = hasConvTag(hasConvId(item));
+    if (!tag) { finish(); return; }
+    hasGet(item.subject, function (subject) {
+      subject = subject || "";
+      if (HAS_TAG_RE.test(subject) || HAS_SKIP_RE.test(subject)) { finish(); return; }
+      try { item.subject.setAsync(hasWithTag(subject, tag), function () { finish(); }); }
+      catch (e) { finish(); }
+    });
+  } catch (e) { finish(); }
+}
+
 var HAS_PROMPT = {
   allowEvent: false,
   errorMessage: "This email is not tagged to a matter. Do you want to add it to a matter? " +
@@ -65,6 +111,13 @@ function hasCheck(event, finish) {
       finish({ allowEvent: true });
       return;
     }
+    var convTag = hasConvTag(hasConvId(item));
+    if (convTag) {
+      try {
+        item.subject.setAsync(hasWithTag(subject, convTag), function () { finish({ allowEvent: true }); });
+      } catch (e) { finish({ allowEvent: true }); }
+      return;
+    }
     var lists = [item.to, item.cc, item.bcc];
     var pending = lists.length;
     var external = false;
@@ -92,6 +145,8 @@ function hasCheck(event, finish) {
 // Register the handler now and again once Office is ready (new Outlook / web need the second call)
 function hasRegister() {
   try { Office.actions.associate("onMessageSendHandler", onMessageSendHandler); }
+  catch (e) { console.log("[HAS] associate failed", e); }
+  try { Office.actions.associate("onNewComposeHandler", onNewComposeHandler); }
   catch (e) { console.log("[HAS] associate failed", e); }
 }
 hasRegister();

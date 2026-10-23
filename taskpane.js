@@ -120,6 +120,33 @@ async function findRequestsRaw(messageKey) {
   return j ? j.value.map(v => ({ ...v.fields, itemId: v.id, created: v.createdDateTime })) : [];
 }
 
+/* ---------- conversation -> matter memory (roaming settings, also read by launchevent.js) ---------- */
+function convKey(id) {
+  if (!id) return "";
+  let a = 0x811c9dc5, b = 0x01000193 ^ 0x5bd1e995;
+  for (let i = 0; i < id.length; i++) { const c = id.charCodeAt(i); a = Math.imul(a ^ c, 16777619) >>> 0; b = Math.imul(b ^ c, 2246822519) >>> 0; }
+  return a.toString(16).padStart(8, "0") + b.toString(16).padStart(8, "0");
+}
+function convMap() { try { return Office.context.roamingSettings.get("hasConv") || {}; } catch (_) { return {}; } }
+function convSave(map) {
+  const keys = Object.keys(map); while (keys.length > 500) delete map[keys.shift()];   // keep the newest 500
+  try { Office.context.roamingSettings.set("hasConv", map); Office.context.roamingSettings.saveAsync(() => {}); } catch (_) {}
+}
+function convSet(convId, tag) { const k = convKey(convId); if (!k || !tag) return; const m = convMap(); delete m[k]; m[k] = tag; convSave(m); }
+function convDel(convId) { const k = convKey(convId); const m = convMap(); if (k && m[k]) { delete m[k]; convSave(m); } }
+function convGet(convId) { const k = convKey(convId); return k ? convMap()[k] || "" : ""; }
+async function findLogByConv(convId) {
+  if (!convId) return [];
+  const j = await gjson(`/sites/${siteId}/lists/${listIds.log}/items?expand=fields&$filter=fields/ConversationId eq '${odataStr(convId.slice(0, 255))}' and fields/Status eq 'Filed'&$top=20`, PREFER);
+  return j ? j.value.map(v => v.fields) : [];
+}
+// put "[TAG] " after any RE:/FW: prefix
+function withTag(subject, tag) {
+  let s = String(subject || "").replace(TAG_RE, "").replace(/\s{2,}/g, " ").trim();
+  const prefix = (s.match(/^((re|fw|fwd|aw)\s*:\s*)+/i) || [""])[0];
+  return (prefix + `[${tag}] ` + s.slice(prefix.length)).trim();
+}
+
 /* ---------- matter input ---------- */
 function parseMatter(raw) {
   const m = String(raw || "").trim().replace(/^\[|\]$/g, "").match(/^(\d{6})([A-Za-z]{0,2})$/);
@@ -152,11 +179,9 @@ function subjAsync() {
 }
 async function addTag() {
   const m = parseMatter($("c-matter").value); if (!m) return;
-  let s = await subjAsync();
-  s = s.replace(TAG_RE, "").replace(/\s{2,}/g, " ").trim();
-  const prefix = (s.match(/^((re|fw|fwd|aw)\s*:\s*)+/i) || [""])[0];
-  s = prefix + `[${m.tag}] ` + s.slice(prefix.length);
-  await setSubject(s.trim());
+  const s = withTag(await subjAsync(), m.tag);
+  await setSubject(s);
+  convSet(Office.context.mailbox.item.conversationId, m.tag);
   show($("c-add-result"), `Subject updated: ${esc(s.trim())}`, "ok");
 }
 async function addMarker(marker) {
@@ -164,6 +189,26 @@ async function addMarker(marker) {
   if (s.toLowerCase().includes(marker.toLowerCase())) { show($("c-dnf-result"), `Already marked ${esc(marker)}.`, "muted"); return; }
   await setSubject((marker + " " + s).trim());
   show($("c-dnf-result"), `Marked ${esc(marker)} – this email will not be filed.`, "ok");
+}
+
+async function autoTagCompose() {
+  const s = await subjAsync();
+  const t = [...s.matchAll(TAG_RE)][0];
+  if (t) { $("c-matter").value = t[1] + t[2]; return; }
+  if (/\[\s*(confidential|personal)\s*\]/i.test(s)) return;
+  const conv = Office.context.mailbox.item.conversationId;
+  if (!conv) return;
+  let tag = convGet(conv);
+  if (!tag) {
+    const rows = await findLogByConv(conv);
+    const matters = [...new Set(rows.map(r => r.MatterNo).filter(Boolean))];
+    if (matters.length === 1) { tag = matters[0]; convSet(conv, tag); }
+    else if (matters.length > 1) { show($("c-add-result"), `This conversation is filed to several matters (${esc(matters.join(", "))}) – pick one and click Add tag.`, "warn"); return; }
+  }
+  if (!tag) return;
+  await setSubject(withTag(s, tag));
+  $("c-matter").value = tag;
+  show($("c-add-result"), `✓ Tag [${esc(tag)}] added automatically – this conversation is filed to ${esc(tag)}.`, "ok");
 }
 
 /* ---------- read: status ---------- */
@@ -215,6 +260,7 @@ async function loadStatus(fresh) {
         for (const id of matchSavedAttachments(kids, r.created)) saved.add(id);
     }
     filedState = { matter: latestFiled.MatterNo, row: latestFiled, idx, saved };
+    if (!dnf && !convGet(item.conversationId)) convSet(item.conversationId, latestFiled.MatterNo);
     if (!$("r-matter").value) $("r-matter").value = latestFiled.MatterNo;
   }
   renderAttachmentList();
@@ -328,7 +374,8 @@ async function fileDirect(idx, m, meta, parts, out) {
   await gjson(`/sites/${siteId}/lists/${listIds.log}/items`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ fields: {
     Title: meta.subject.slice(0, 255), MessageKey: meta.key, MatterNo: m.parent, Status: "Filed", MatchMethod: "Add-in",
     Mailbox: me, Direction: meta.from.toLowerCase() === me ? "Out" : "In", FromAddress: meta.from.toLowerCase(), SentUtc: meta.sentIso,
-    FolderPath: idx.FolderPath || "", EmlUrl: saved.webUrl || "", AttachmentCount: parts.atts.length } }) });
+    FolderPath: idx.FolderPath || "", EmlUrl: saved.webUrl || "", AttachmentCount: parts.atts.length,
+    ConversationId: (meta.conv || "").slice(0, 255) } }) });
   return saved;
 }
 
@@ -341,7 +388,7 @@ async function fileQueued(m, meta, parts, out) {
   await gjson(`/sites/${siteId}/lists/${listIds.requests}/items`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ fields: {
     Title: reqId, MatterNo: m.parent, MatterTag: m.tag, MessageKey: meta.key, Subject: meta.subject.slice(0, 255),
     FromAddress: meta.from, SentUtc: meta.sentIso, RequestedBy: Office.context.mailbox.userProfile.emailAddress,
-    EmlName: meta.emlName, AttachmentCount: parts.atts.length, Status: "Pending" } }) });
+    EmlName: meta.emlName, AttachmentCount: parts.atts.length, Status: "Pending", ConversationId: (meta.conv || "").slice(0, 255) } }) });
 }
 
 let pollTimer;
@@ -399,7 +446,7 @@ async function fileEmail() {
     const base = cleanName(item.subject) || "(No subject)";
     const st = stamp(received);
     const meta = {
-      key, subject: item.subject || "", from: item.from ? item.from.emailAddress : "", sentIso: received.toISOString(),
+      key, conv: item.conversationId || "", subject: item.subject || "", from: item.from ? item.from.emailAddress : "", sentIso: received.toISOString(),
       emlName: `${st} - ${base}.eml`,
       stamped: (n) => `${st} - ${n}`,
     };
@@ -410,6 +457,7 @@ async function fileEmail() {
     if (idx && idx.State === "Active" && idx.DriveId && idx.EmailsFolderId && idx.AttachmentsFolderId) {
       try {
         await fileDirect(idx, m, meta, parts, out);
+        convSet(meta.conv, m.tag);
         show(out, `✓ Filed to ${esc(m.tag)} now – ${parts.atts.length} attachment(s)${skippedNote}. <a href="${esc(idx.FolderPath)}" target="_blank" rel="noopener">Open folder</a>`, "ok");
         loadStatus(true).catch(fail);
         return;
@@ -418,6 +466,7 @@ async function fileEmail() {
       }
     }
     await fileQueued(m, meta, parts, out);
+    convSet(meta.conv, m.tag);
     show(out, `✓ Sent for filing to ${esc(m.tag)} – ${parts.atts.length} attachment(s)${skippedNote}. The status above updates automatically (usually within 5 minutes).`, "ok");
     loadStatus(true).catch(fail);
     pollStatus(key);
@@ -495,6 +544,7 @@ async function doNotFile() {
     try { await ensureCategory(); } catch (e) { catErr = e.detail || e.message; }
     try { await mbxAsync((cb) => item.categories.addAsync([DNF_CATEGORY], cb)); }
     catch (e) { show(out, `${NOCAT_MSG}<div class="muted small">${esc(catErr || (e && e.message) || "")}</div>`, "bad"); return; }
+    convDel(item.conversationId);   // replies in this conversation are no longer auto-tagged
     // cancel anything still queued
     for (const r of (await findRequests(key)).filter(r => r.Status === "Pending"))
       await gjson(`/sites/${siteId}/lists/${listIds.requests}/items/${r.itemId}/fields`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ Status: "Cancelled", Result: "Marked Do not file" }) });
@@ -582,8 +632,8 @@ if (!IS_AUTH_POPUP) Office.onReady(async () => {
       $("c-add").onclick = () => addTag().catch(fail);
       $("c-conf").onclick = () => addMarker("[Confidential]").catch(fail);
       $("c-pers").onclick = () => addMarker("[Personal]").catch(fail);
-      // prefill from an existing tag in the subject
-      subjAsync().then(s => { const t = [...s.matchAll(TAG_RE)][0]; if (t) $("c-matter").value = t[1] + t[2]; }).catch(() => {});
+      // prefill from an existing tag in the subject, or auto-tag a reply/forward of a filed conversation
+      autoTagCompose().catch(() => {});
       try { $("c-matter").focus(); } catch (e) {}
     } else {
       $("read").hidden = false;
