@@ -298,14 +298,18 @@ async function loadStatus(fresh) {
   if (e && e.kind === "log") {
     const l = e.l, when = fmtWhen(l.created);
     const allFiled = [...new Set(log.filter(x => x.Status === "Filed" && !log.some(r => r.Status === "Removed" && r.MatterNo === x.MatterNo && new Date(r.created) > new Date(x.created))).map(x => x.MatterNo))];
-    if (l.Status === "Filed") html = `<div class="status-item ok">✓ Filed to <b>${esc((allFiled.length ? allFiled : [l.MatterNo]).join(", "))}</b> · ${esc(when)}${l.FolderPath ? ` · <a href="${esc(l.FolderPath)}" target="_blank" rel="noopener">open folder</a>` : ""}</div>`;
+    const by = l.MatchMethod === "Add-in" ? "via add-in" : (l.Mailbox ? "by " + String(l.Mailbox).split("@")[0] : "");
+    if (l.Status === "Filed") html = `<div class="status-item ok">✓ Filed to <b>${esc((allFiled.length ? allFiled : [l.MatterNo]).join(", "))}</b>${l.IsCourt ? " · ⚖ court" : ""} · ${esc(when)}${by ? " · " + esc(by) : ""}${l.FolderPath ? ` · <a href="${esc(l.FolderPath)}" target="_blank" rel="noopener">open folder</a>` : ""}</div>`;
     else if (l.Status === "Review") html = `<div class="status-item warn">In review${l.MatterNo ? " (" + esc(l.MatterNo) + ")" : ""} · ${esc(when)}</div>`;
     else if (l.Status === "Removed") html = `<div class="status-item muted">Removed from ${esc(l.MatterNo)} · ${esc(when)}</div>`;
     else html = `<div class="status-item bad">Not filed – last attempt failed${l.MatterNo ? " (" + esc(l.MatterNo) + ")" : ""} · ${esc(when)}</div>`;
   } else if (e && e.kind === "req") {
-    html = e.r.Status === "Pending" ? `<div class="status-item muted">⏳ Being filed to ${esc(e.r.MatterTag || e.r.MatterNo)} – usually within 5 minutes</div>`
+    html = e.r.Status === "Pending" ? `<div class="status-item muted">⏳ Being filed to ${esc(e.r.MatterTag || e.r.MatterNo)} – usually within 15 minutes</div>`
                                     : `<div class="status-item bad">Filing to ${esc(e.r.MatterTag || e.r.MatterNo)} failed: ${esc(e.r.Result || "")}</div>`;
   }
+  const subjTags = tagsIn(item.subject);
+  if (!html && subjTags.length && !dnf)
+    html = `<div class="status-item muted">🏷 Tagged to <b>${esc(subjTags.join(", "))}</b> – will be filed automatically at the next sync (every 15 minutes).</div>`;
   if (dnf) html = `<div class="status-item warn">⛔ Marked Do not file</div>` + html;
   setDnfUi(dnf);
   box.className = ""; box.innerHTML = html || `<span class="muted">Not filed yet.</span>`;
@@ -453,7 +457,7 @@ async function fileDirect(idx, m, meta, parts, out) {
   return saved;
 }
 
-// Queue path: the filing flow (full access) files it within ~5 minutes.
+// Queue path: the filing flow (full access) files it within ~15 minutes.
 async function fileQueued(m, meta, parts, out) {
   const reqId = `${stamp(new Date()).replace(/[- ]/g, "")}-${Math.random().toString(36).slice(2, 8)}`;
   show(out, "Sending to filing queue…", "muted");
@@ -473,7 +477,7 @@ function pollStatus(key) {
     try {
       await loadStatus(true);
       const pending = (await findRequests(key)).some(r => r.Status === "Pending");
-      if (!pending || n > 40) clearInterval(pollTimer);
+      if (!pending || n > 80) clearInterval(pollTimer);
     } catch (_) { clearInterval(pollTimer); }
   }, 15000);
 }
@@ -544,7 +548,7 @@ async function fileEmail() {
     }
     await fileQueued(m, meta, parts, out);
     convSet(meta.conv, m.tag, meta.court);
-    show(out, `✓ Sent for filing to ${esc(m.tag)} – ${parts.atts.length} attachment(s)${skippedNote}. The status above updates automatically (usually within 5 minutes).`, "ok");
+    show(out, `✓ Sent for filing to ${esc(m.tag)} – ${parts.atts.length} attachment(s)${skippedNote}. The status above updates automatically (usually within 15 minutes).`, "ok");
     loadStatus(true).catch(fail);
     pollStatus(key);
   } catch (e) {
