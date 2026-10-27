@@ -46,18 +46,27 @@ function hasConvKey(id) {
   for (var i = 0; i < id.length; i++) { var c = id.charCodeAt(i); a = hasImul(a ^ c, 16777619) >>> 0; b = hasImul(b ^ c, 2246822519) >>> 0; }
   return hasHex8(a) + hasHex8(b);
 }
-function hasConvTag(convId) {
+// stored value: "261760,261535" or "~261760" (leading ~ = court conversation)
+function hasConvRaw(convId) {
   try {
     var m = Office.context.roamingSettings.get("hasConv") || {};
     var k = hasConvKey(convId);
     return k && m[k] ? String(m[k]) : "";
   } catch (e) { return ""; }
 }
+function hasConvCourt(convId) { return hasConvRaw(convId).charAt(0) === "~"; }
+function hasConvTag(convId) { var v = hasConvRaw(convId); return v.charAt(0) === "~" ? "" : v; }
+function hasCourtDomains() { try { return Office.context.roamingSettings.get("hasCourtDomains") || []; } catch (e) { return []; } }
+function hasStripTags(subject) {
+  return String(subject || "").replace(/\[\s*\d{6}[A-Za-z]{0,2}\s*\]/g, "").replace(/\s{2,}/g, " ").replace(/^\s+|\s+$/g, "");
+}
 function hasWithTag(subject, tag) {
   var s = String(subject || "").replace(/\[\s*\d{6}[A-Za-z]{0,2}\s*\]/g, "").replace(/\s{2,}/g, " ").replace(/^\s+|\s+$/g, "");
   var m = s.match(/^((re|fw|fwd|aw)\s*:\s*)+/i);
   var prefix = m ? m[0] : "";
-  return (prefix + "[" + tag + "] " + s.slice(prefix.length)).replace(/\s+$/, "");
+  var tags = String(tag || "").split(","), out = "";
+  for (var i = 0; i < tags.length && i < 5; i++) { var t = tags[i].replace(/^\s+|\s+$/g, ""); if (t) out += "[" + t + "] "; }
+  return (prefix + out + s.slice(prefix.length)).replace(/\s+$/, "");
 }
 function hasConvId(item) { try { return item.conversationId || ""; } catch (e) { return ""; } }
 
@@ -68,7 +77,16 @@ function onNewComposeHandler(event) {
   setTimeout(finish, 4000);
   try {
     var item = Office.context.mailbox.item;
-    var tag = hasConvTag(hasConvId(item));
+    var convId = hasConvId(item);
+    if (hasConvCourt(convId)) {
+      hasGet(item.subject, function (subject) {
+        subject = subject || "";
+        if (!HAS_TAG_RE.test(subject)) { finish(); return; }
+        try { item.subject.setAsync(hasStripTags(subject), function () { finish(); }); } catch (e) { finish(); }
+      });
+      return;
+    }
+    var tag = hasConvTag(convId);
     if (!tag) { finish(); return; }
     hasGet(item.subject, function (subject) {
       subject = subject || "";
@@ -107,6 +125,49 @@ function hasCheck(event, finish) {
 
   hasGet(item.subject, function (subject) {
     subject = subject || "";
+    var convId = hasConvId(item);
+    var courtConv = hasConvCourt(convId);
+    var courtDoms = hasCourtDomains();
+    // court: remove any matter number and send without asking
+    function sendAsCourt() {
+      if (!HAS_TAG_RE.test(subject)) { finish({ allowEvent: true }); return; }
+      try { item.subject.setAsync(hasStripTags(subject), function () { finish({ allowEvent: true }); }); }
+      catch (e) { finish({ allowEvent: true }); }
+    }
+    if (courtConv) { sendAsCourt(); return; }
+    if (courtDoms.length) {
+      hasAnyRecipient(item, function (addr) { return hasDomainIn(addr, courtDoms); }, function (isCourt) {
+        if (isCourt) sendAsCourt(); else hasCheckNormal(item, subject, finish);
+      });
+      return;
+    }
+    hasCheckNormal(item, subject, finish);
+  });
+}
+
+function hasDomainIn(address, list) {
+  var a = String(address || "").toLowerCase(), at = a.lastIndexOf("@");
+  if (at < 0) return false;
+  var d = a.substring(at + 1);
+  for (var i = 0; i < list.length; i++) { var x = String(list[i]).toLowerCase(); if (d === x || d.slice(-(x.length + 1)) === "." + x) return true; }
+  return false;
+}
+// cb(true) if any To/Cc/Bcc recipient matches test()
+function hasAnyRecipient(item, test, cb) {
+  var lists = [item.to, item.cc, item.bcc], pending = lists.length, hit = false;
+  for (var i = 0; i < lists.length; i++) {
+    (function (field) {
+      if (!field) { if (--pending === 0) cb(hit); return; }
+      hasGet(field, function (recips) {
+        if (recips) for (var j = 0; j < recips.length; j++) if (test(recips[j].emailAddress)) { hit = true; break; }
+        if (--pending === 0) cb(hit);
+      });
+    })(lists[i]);
+  }
+}
+
+function hasCheckNormal(item, subject, finish) {
+  (function () {
     if (HAS_TAG_RE.test(subject) || HAS_SKIP_RE.test(subject)) {
       finish({ allowEvent: true });
       return;
@@ -139,7 +200,7 @@ function hasCheck(event, finish) {
       if (!external) { finish({ allowEvent: true }); return; }
       finish(HAS_PROMPT);
     }
-  });
+  })();
 }
 
 // Register the handler now and again once Office is ready (new Outlook / web need the second call)

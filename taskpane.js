@@ -3,7 +3,7 @@ const CFG = {
   tenant: "e477b781-89bb-444f-951c-b746325df73a",
   clientId: (window.HAS_CONFIG || {}).clientId,
   sitePath: "haslegal.sharepoint.com:/sites/MatterFiling",
-  lists: { index: "Folder Index", log: "Filing Log", requests: "Filing Requests" },
+  lists: { index: "Folder Index", log: "Filing Log", requests: "Filing Requests", settings: "Settings" },
   inboxLibrary: "Filing Inbox",
   inlineSkipBytes: 30000,
   timeZone: "Asia/Dubai",
@@ -80,7 +80,7 @@ const gjson = async (url, opt) => { const r = await gfetch(url, opt); return r.s
 async function initSite() {
   try {
     const c = JSON.parse(localStorage.getItem("hasFilingSite") || "null");
-    if (c && c.exp > Date.now() && c.siteId && c.inboxDriveId && c.listIds && c.listIds.requests) {
+    if (c && c.exp > Date.now() && c.siteId && c.inboxDriveId && c.listIds && c.listIds.requests && c.listIds.settings) {
       siteId = c.siteId; listIds = c.listIds; inboxDriveId = c.inboxDriveId; return;
     }
   } catch (_) {}
@@ -132,19 +132,46 @@ function convSave(map) {
   const keys = Object.keys(map); while (keys.length > 500) delete map[keys.shift()];   // keep the newest 500
   try { Office.context.roamingSettings.set("hasConv", map); Office.context.roamingSettings.saveAsync(() => {}); } catch (_) {}
 }
-function convSet(convId, tag) { const k = convKey(convId); if (!k || !tag) return; const m = convMap(); delete m[k]; m[k] = tag; convSave(m); }
+function convParse(v) { v = String(v || ""); const court = v.startsWith("~"); return { court, tags: v.replace(/^~/, "").split(",").map(x => x.trim()).filter(Boolean) }; }
+// court: true / false / undefined (keep what is stored)
+function convSet(convId, tag, court) {
+  const k = convKey(convId); if (!k || (!tag && court === undefined)) return;
+  const m = convMap(); const cur = convParse(m[k]);
+  const tags = [...new Set([...cur.tags, ...String(tag || "").split(",").map(x => x.trim()).filter(Boolean)])].slice(0, 5);
+  const isCourt = court === undefined ? cur.court : !!court;
+  delete m[k]; m[k] = (isCourt ? "~" : "") + tags.join(","); convSave(m);
+}
+function convInfo(convId) { const k = convKey(convId); return convParse(k ? convMap()[k] : ""); }
 function convDel(convId) { const k = convKey(convId); const m = convMap(); if (k && m[k]) { delete m[k]; convSave(m); } }
-function convGet(convId) { const k = convKey(convId); return k ? convMap()[k] || "" : ""; }
+function convGet(convId) { return convInfo(convId).tags.join(","); }
+// court domains (Settings list item "CourtDomains", e.g. "dc.gov.ae;adjd.gov.ae") – also copied to roaming settings for the send check
+async function courtDomains() {
+  return memoize("court", 3600000, async () => {
+    let list = [];
+    try {
+      const j = await gjson(`/sites/${siteId}/lists/${listIds.settings}/items?expand=fields&$filter=fields/Title eq 'CourtDomains'&$top=1`, PREFER);
+      list = String((j && j.value[0] && j.value[0].fields.Value) || "").toLowerCase().split(/[;,\s]+/).map(x => x.trim()).filter(Boolean);
+    } catch (_) {}
+    try { Office.context.roamingSettings.set("hasCourtDomains", list); Office.context.roamingSettings.saveAsync(() => {}); } catch (_) {}
+    return list;
+  });
+}
+const domainOf = (a) => String(a || "").toLowerCase().split("@").pop();
+function stripTags(subject) { return String(subject || "").replace(TAG_RE, "").replace(/\s{2,}/g, " ").trim(); }
 async function findLogByConv(convId) {
   if (!convId) return [];
   const j = await gjson(`/sites/${siteId}/lists/${listIds.log}/items?expand=fields&$filter=fields/ConversationId eq '${odataStr(convId.slice(0, 255))}' and fields/Status eq 'Filed'&$top=20`, PREFER);
+  // (rows carry IsCourt when the conversation was filed as a court email)
   return j ? j.value.map(v => v.fields) : [];
 }
 // put "[TAG] " after any RE:/FW: prefix
+function tagsIn(subject) { return [...String(subject || "").matchAll(TAG_RE)].map(t => (t[1] + t[2]).toUpperCase()); }
 function withTag(subject, tag) {
+  const add = String(tag || "").split(",").map(x => x.trim().toUpperCase()).filter(Boolean);
+  const all = [...new Set([...tagsIn(subject), ...add])].slice(0, 5);
   let s = String(subject || "").replace(TAG_RE, "").replace(/\s{2,}/g, " ").trim();
   const prefix = (s.match(/^((re|fw|fwd|aw)\s*:\s*)+/i) || [""])[0];
-  return (prefix + `[${tag}] ` + s.slice(prefix.length)).trim();
+  return (prefix + all.map(t => `[${t}] `).join("") + s.slice(prefix.length).trim()).trim();
 }
 
 /* ---------- matter input ---------- */
@@ -179,9 +206,15 @@ function subjAsync() {
 }
 async function addTag() {
   const m = parseMatter($("c-matter").value); if (!m) return;
-  const s = withTag(await subjAsync(), m.tag);
+  if (await composeIsCourt()) { show($("c-add-result"), "⚖ This is a court email – the matter number is not added to the subject. It is still saved to the matter.", "warn"); return; }
+  const before = await subjAsync();
+  if (tagsIn(before).includes(m.tag.toUpperCase())) { show($("c-add-result"), `[${esc(m.tag)}] is already in the subject.`, "muted"); return; }
+  if (tagsIn(before).length >= 5) { show($("c-add-result"), "Up to 5 matters per email.", "warn"); return; }
+  const s = withTag(before, m.tag);
   await setSubject(s);
   convSet(Office.context.mailbox.item.conversationId, m.tag);
+  const n = tagsIn(s).length;
+  if (n > 1) { show($("c-add-result"), `Subject updated: ${esc(s)}<br><span class="muted small">This email will be saved in all ${n} matters.</span>`, "ok"); $("c-matter").value = ""; return; }
   show($("c-add-result"), `Subject updated: ${esc(s.trim())}`, "ok");
 }
 async function addMarker(marker) {
@@ -191,7 +224,24 @@ async function addMarker(marker) {
   show($("c-dnf-result"), `Marked ${esc(marker)} – this email will not be filed.`, "ok");
 }
 
+async function composeIsCourt() {
+  const item = Office.context.mailbox.item, conv = item.conversationId;
+  if (conv && convInfo(conv).court) return true;
+  if (conv) { const rows = await findLogByConv(conv).catch(() => []); if (rows.some(r => r.IsCourt)) { convSet(conv, "", true); return true; } }
+  const doms = await courtDomains();
+  if (!doms.length) return false;
+  const rec = [];
+  for (const f of ["to", "cc"]) { try { rec.push(...(await mbxAsync((cb) => item[f].getAsync(cb)))); } catch (_) {} }
+  return rec.some(r => doms.includes(domainOf(r.emailAddress)));
+}
 async function autoTagCompose() {
+  if (await composeIsCourt()) {
+    const cur = await subjAsync();
+    if (TAG_RE.test(cur)) { TAG_RE.lastIndex = 0; await setSubject(stripTags(cur)); }
+    TAG_RE.lastIndex = 0;
+    show($("c-add-result"), "⚖ Court email – no matter tag is added to the subject. It is still saved to the matter.", "muted");
+    return;
+  }
   const s = await subjAsync();
   const t = [...s.matchAll(TAG_RE)][0];
   if (t) { $("c-matter").value = t[1] + t[2]; return; }
@@ -202,13 +252,24 @@ async function autoTagCompose() {
   if (!tag) {
     const rows = await findLogByConv(conv);
     const matters = [...new Set(rows.map(r => r.MatterNo).filter(Boolean))];
-    if (matters.length === 1) { tag = matters[0]; convSet(conv, tag); }
-    else if (matters.length > 1) { show($("c-add-result"), `This conversation is filed to several matters (${esc(matters.join(", "))}) – pick one and click Add tag.`, "warn"); return; }
+    if (matters.length) { tag = matters.slice(0, 5).join(","); convSet(conv, tag); }
   }
   if (!tag) return;
   await setSubject(withTag(s, tag));
-  $("c-matter").value = tag;
-  show($("c-add-result"), `✓ Tag [${esc(tag)}] added automatically – this conversation is filed to ${esc(tag)}.`, "ok");
+  $("c-matter").value = tag.split(",")[0];
+  show($("c-add-result"), `✓ Added automatically – this conversation is filed to ${esc(tag.split(",").join(", "))}.`, "ok");
+}
+
+// tick / untick "Court email" on an email that is already filed: update the log and the reply memory
+async function onCourtChange() {
+  const item = Office.context.mailbox.item, out = $("r-court-result"), court = $("r-court").checked;
+  if (!filedState) { show(out, court ? "Will be filed as a court email." : "", "muted"); return; }
+  const rows = (await findLog(item.internetMessageId)).filter(l => l.Status === "Filed");
+  for (const r of rows)
+    await gjson(`/sites/${siteId}/lists/${listIds.log}/items/${r.itemId}/fields`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ IsCourt: court }) });
+  convSet(item.conversationId, "", court);
+  forget("log:");
+  show(out, court ? "✓ Marked as court email – replies and forwards will not get the matter number." : "✓ No longer a court email – replies and forwards will get the matter number again.", "ok");
 }
 
 /* ---------- read: status ---------- */
@@ -236,7 +297,8 @@ async function loadStatus(fresh) {
     e = { kind: "log", l: lastFiled };
   if (e && e.kind === "log") {
     const l = e.l, when = fmtWhen(l.created);
-    if (l.Status === "Filed") html = `<div class="status-item ok">✓ Filed to <b>${esc(l.MatterNo)}</b> · ${esc(when)}${l.FolderPath ? ` · <a href="${esc(l.FolderPath)}" target="_blank" rel="noopener">open folder</a>` : ""}</div>`;
+    const allFiled = [...new Set(log.filter(x => x.Status === "Filed" && !log.some(r => r.Status === "Removed" && r.MatterNo === x.MatterNo && new Date(r.created) > new Date(x.created))).map(x => x.MatterNo))];
+    if (l.Status === "Filed") html = `<div class="status-item ok">✓ Filed to <b>${esc((allFiled.length ? allFiled : [l.MatterNo]).join(", "))}</b> · ${esc(when)}${l.FolderPath ? ` · <a href="${esc(l.FolderPath)}" target="_blank" rel="noopener">open folder</a>` : ""}</div>`;
     else if (l.Status === "Review") html = `<div class="status-item warn">In review${l.MatterNo ? " (" + esc(l.MatterNo) + ")" : ""} · ${esc(when)}</div>`;
     else if (l.Status === "Removed") html = `<div class="status-item muted">Removed from ${esc(l.MatterNo)} · ${esc(when)}</div>`;
     else html = `<div class="status-item bad">Not filed – last attempt failed${l.MatterNo ? " (" + esc(l.MatterNo) + ")" : ""} · ${esc(when)}</div>`;
@@ -259,8 +321,11 @@ async function loadStatus(fresh) {
       for (const r of log.filter(l => l.Status === "Filed" && l.MatterNo === latestFiled.MatterNo))
         for (const id of matchSavedAttachments(kids, r.created)) saved.add(id);
     }
-    filedState = { matter: latestFiled.MatterNo, row: latestFiled, idx, saved };
-    if (!dnf && !convGet(item.conversationId)) convSet(item.conversationId, latestFiled.MatterNo);
+    filedState = { matter: latestFiled.MatterNo, row: latestFiled, idx, saved,
+      matters: new Set(log.filter(x => x.Status === "Filed").map(x => x.MatterNo)) };
+    const court = log.some(x => x.Status === "Filed" && x.IsCourt);
+    if (!dnf) convSet(item.conversationId, [...new Set(log.filter(x => x.Status === "Filed").map(x => x.MatterNo))].join(","), court || undefined);
+    $("r-court").checked = court || convInfo(item.conversationId).court;
     if (!$("r-matter").value) $("r-matter").value = latestFiled.MatterNo;
   }
   renderAttachmentList();
@@ -332,9 +397,18 @@ function renderAttachmentList() {
   box.querySelectorAll("input[type=checkbox]").forEach(c => c.onchange = updateFileButton);
   updateFileButton();
 }
+// a different matter typed in the box while this email is already filed elsewhere -> file a copy there too
+function newMatterTyped() {
+  const t = String($("r-matter").value || "").trim().replace(/^\[|\]$/g, "").match(/^(\d{6})([A-Za-z]{0,2})$/);
+  return filedState && t && !filedState.matters.has(t[1]) ? t[1] + t[2] : "";
+}
 function updateFileButton() {
   const btn = $("r-file"), sel = selectedAttachmentIds().length;
-  if (filedState) {
+  const extra = newMatterTyped();
+  if (extra) {
+    btn.textContent = `Also file to ${extra}`;
+    btn.disabled = false;
+  } else if (filedState) {
     btn.textContent = sel ? `Save ${sel} selected attachment${sel > 1 ? "s" : ""} to ${filedState.matter}` : "Already filed";
     btn.disabled = !sel;
   } else {
@@ -375,7 +449,7 @@ async function fileDirect(idx, m, meta, parts, out) {
     Title: meta.subject.slice(0, 255), MessageKey: meta.key, MatterNo: m.parent, Status: "Filed", MatchMethod: "Add-in",
     Mailbox: me, Direction: meta.from.toLowerCase() === me ? "Out" : "In", FromAddress: meta.from.toLowerCase(), SentUtc: meta.sentIso,
     FolderPath: idx.FolderPath || "", EmlUrl: saved.webUrl || "", AttachmentCount: parts.atts.length,
-    ConversationId: (meta.conv || "").slice(0, 255) } }) });
+    ConversationId: (meta.conv || "").slice(0, 255), IsCourt: !!meta.court } }) });
   return saved;
 }
 
@@ -388,7 +462,7 @@ async function fileQueued(m, meta, parts, out) {
   await gjson(`/sites/${siteId}/lists/${listIds.requests}/items`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ fields: {
     Title: reqId, MatterNo: m.parent, MatterTag: m.tag, MessageKey: meta.key, Subject: meta.subject.slice(0, 255),
     FromAddress: meta.from, SentUtc: meta.sentIso, RequestedBy: Office.context.mailbox.userProfile.emailAddress,
-    EmlName: meta.emlName, AttachmentCount: parts.atts.length, Status: "Pending", ConversationId: (meta.conv || "").slice(0, 255) } }) });
+    EmlName: meta.emlName, AttachmentCount: parts.atts.length, Status: "Pending", ConversationId: (meta.conv || "").slice(0, 255), IsCourt: !!meta.court } }) });
 }
 
 let pollTimer;
@@ -411,8 +485,8 @@ async function fileEmail() {
   const key = item.internetMessageId;
   btn.disabled = true;
   if (await hasDnf()) { try { await removeDnf(); show($("r-dnf-result"), "Do not file mark removed because you filed this email.", "muted"); setDnfUi(false); } catch (_) {} }
-  // already filed: only save the extra attachments that were ticked
-  if (filedState) {
+  // already filed to this matter: only save the extra attachments that were ticked
+  if (filedState && !newMatterTyped()) {
     try {
       const ids = selectedAttachmentIds(); if (!ids.length) return;
       const idx = filedState.idx;
@@ -446,18 +520,21 @@ async function fileEmail() {
     const base = cleanName(item.subject) || "(No subject)";
     const st = stamp(received);
     const meta = {
-      key, conv: item.conversationId || "", subject: item.subject || "", from: item.from ? item.from.emailAddress : "", sentIso: received.toISOString(),
+      key, conv: item.conversationId || "", court: $("r-court").checked, subject: item.subject || "", from: item.from ? item.from.emailAddress : "", sentIso: received.toISOString(),
       emlName: `${st} - ${base}.eml`,
       stamped: (n) => `${st} - ${n}`,
     };
-    const parts = await collectParts(item, selectedAttachmentIds(), out);
+    const wanted = newMatterTyped()
+      ? (item.attachments || []).filter(x => !x.isInline && x.attachmentType !== "cloud").map(x => x.id)   // copy for another matter: all real attachments
+      : selectedAttachmentIds();
+    const parts = await collectParts(item, wanted, out);
     const skippedNote = parts.skipped ? `, ${parts.skipped} cloud link(s) skipped` : "";
 
     const idx = await findIndex(m.parent);
     if (idx && idx.State === "Active" && idx.DriveId && idx.EmailsFolderId && idx.AttachmentsFolderId) {
       try {
         await fileDirect(idx, m, meta, parts, out);
-        convSet(meta.conv, m.tag);
+        convSet(meta.conv, m.tag, meta.court);
         show(out, `✓ Filed to ${esc(m.tag)} now – ${parts.atts.length} attachment(s)${skippedNote}. <a href="${esc(idx.FolderPath)}" target="_blank" rel="noopener">Open folder</a>`, "ok");
         loadStatus(true).catch(fail);
         return;
@@ -466,7 +543,7 @@ async function fileEmail() {
       }
     }
     await fileQueued(m, meta, parts, out);
-    convSet(meta.conv, m.tag);
+    convSet(meta.conv, m.tag, meta.court);
     show(out, `✓ Sent for filing to ${esc(m.tag)} – ${parts.atts.length} attachment(s)${skippedNote}. The status above updates automatically (usually within 5 minutes).`, "ok");
     loadStatus(true).catch(fail);
     pollStatus(key);
@@ -644,6 +721,9 @@ if (!IS_AUTH_POPUP) Office.onReady(async () => {
       $("r-matter").oninput = updateFileButton;
       $("r-file").onclick = () => fileEmail();
       $("r-dnf").onclick = () => onDnfClick();
+      $("r-court").onchange = () => onCourtChange().catch(fail);
+      // pre-tick for senders on the court domain list
+      courtDomains().then(d => { if (!filedState && d.includes(domainOf(Office.context.mailbox.item.from && Office.context.mailbox.item.from.emailAddress))) $("r-court").checked = true; }).catch(() => {});
       renderAttachmentList();
       loadStatus(true).catch(fail);
       if (Office.context.mailbox.addHandlerAsync && Office.EventType.ItemChanged)
