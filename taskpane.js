@@ -57,14 +57,20 @@ async function token(interactive) {
   const login = Office.context.mailbox.userProfile.emailAddress;
   const req = { scopes: SCOPES, loginHint: login };
   const keep = (r) => { cached = { t: r.accessToken, exp: r.expiresOn ? new Date(r.expiresOn).getTime() : Date.now() + 30 * 60000 }; return r.accessToken; };
+  // "Sign in" button: go straight to the interactive sign-in (no waiting on the silent attempt again)
+  if (interactive) return keep(await pca.acquireTokenPopup(req));
   try {
     const acct = pca.getAllAccounts().find(a => (a.username || "").toLowerCase() === login.toLowerCase());
-    // first load after an Outlook start/update can be slow: wait longer and retry once before asking the user
-    try { return keep(await withTimeout(pca.acquireTokenSilent({ ...req, account: acct }), 25000, "Silent sign-in")); }
-    catch (e1) { return keep(await withTimeout(pca.acquireTokenSilent({ ...req, account: acct }), 20000, "Silent sign-in")); }
+    // with a cached account use acquireTokenSilent; without one use ssoSilent (Outlook's own sign-in via loginHint)
+    const silent = () => acct ? pca.acquireTokenSilent({ ...req, account: acct }) : pca.ssoSilent(req);
+    try { return keep(await withTimeout(silent(), 15000, "Silent sign-in")); }
+    catch (e1) {
+      // second chance with the other method
+      const other = acct ? pca.ssoSilent(req) : pca.acquireTokenSilent({ ...req, account: pca.getAllAccounts()[0] });
+      return keep(await withTimeout(other, 15000, "Silent sign-in"));
+    }
   } catch (e) {
-    if (!interactive) { const n = new Error("SIGNIN_NEEDED: " + (e.errorCode || e.message || e)); n.needSignIn = true; throw n; }
-    return keep(await pca.acquireTokenPopup(req));
+    const n = new Error("SIGNIN_NEEDED: " + (e.errorCode || e.message || e)); n.needSignIn = true; throw n;
   }
 }
 async function gfetch(url, opt = {}) {
