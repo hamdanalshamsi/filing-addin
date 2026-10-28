@@ -18,9 +18,19 @@ const show = (el, html, cls) => { el.className = "hint " + (cls || ""); el.inner
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const odataStr = (s) => encodeURIComponent(String(s).replace(/'/g, "''"));
 
+const NO_ACCESS_MSG = "403 – Access denied : Please contact IT";
+function isNoAccess(e) {
+  const m = String((e && (e.message || e.errorMessage)) || e || "");
+  return !!e && (e.status === 401 || e.status === 403 || /access denied|forbidden|don't have access to the Matter Filing site/i.test(m));
+}
 function fail(e) {
   console.error(e);
   const box = $("err"); box.hidden = false;
+  if (isNoAccess(e)) {
+    box.className = "error noaccess";
+    box.innerHTML = `<b>${esc(NO_ACCESS_MSG)}</b>`;
+    return;
+  }
   box.textContent = (e && (e.message || e.errorMessage)) ? (e.message || e.errorMessage) : String(e);
 }
 
@@ -304,7 +314,7 @@ async function loadStatus(fresh) {
     else if (l.Status === "Removed") html = `<div class="status-item muted">Removed from ${esc(l.MatterNo)} · ${esc(when)}</div>`;
     else html = `<div class="status-item bad">Not filed – last attempt failed${l.MatterNo ? " (" + esc(l.MatterNo) + ")" : ""} · ${esc(when)}</div>`;
   } else if (e && e.kind === "req") {
-    html = e.r.Status === "Pending" ? `<div class="status-item muted">⏳ Being filed to ${esc(e.r.MatterTag || e.r.MatterNo)} – usually within 15 minutes</div>`
+    html = e.r.Status === "Pending" ? `<div class="status-item muted">⏳ Being filed to ${esc(e.r.MatterTag || e.r.MatterNo)} – usually within 1–2 minutes</div>`
                                     : `<div class="status-item bad">Filing to ${esc(e.r.MatterTag || e.r.MatterNo)} failed: ${esc(e.r.Result || "")}</div>`;
   }
   const subjTags = tagsIn(item.subject);
@@ -363,7 +373,8 @@ function stamp(d) {
 }
 // Upload bytes to "<base>:/<name>" where base is "/drives/{d}/items/{folderId}" or "/drives/{d}/root:/{path}" style prefix.
 async function uploadTo(base, name, bytes) {
-  const target = `${base}:/${encodeURIComponent(name)}`;
+  // base is either ".../items/{folderId}" (add ":/name") or ".../root:/folder/path" (already a path: add "/name")
+  const target = /\/root:\//.test(base) ? `${base}/${encodeURIComponent(name)}` : `${base}:/${encodeURIComponent(name)}`;
   if (bytes.length <= 4 * 1024 * 1024) {
     const r = await gfetch(`${target}:/content?@microsoft.graph.conflictBehavior=rename`, { method: "PUT", headers: { "Content-Type": "application/octet-stream" }, body: bytes });
     if (!r.ok) { const e = new Error("Upload failed: " + r.status); e.status = r.status; throw e; }
@@ -457,7 +468,7 @@ async function fileDirect(idx, m, meta, parts, out) {
   return saved;
 }
 
-// Queue path: the filing flow (full access) files it within ~15 minutes.
+// Queue path: the queue flow (full access, runs every minute) files it within ~1-2 minutes.
 async function fileQueued(m, meta, parts, out) {
   const reqId = `${stamp(new Date()).replace(/[- ]/g, "")}-${Math.random().toString(36).slice(2, 8)}`;
   show(out, "Sending to filing queue…", "muted");
@@ -548,7 +559,7 @@ async function fileEmail() {
     }
     await fileQueued(m, meta, parts, out);
     convSet(meta.conv, m.tag, meta.court);
-    show(out, `✓ Sent for filing to ${esc(m.tag)} – ${parts.atts.length} attachment(s)${skippedNote}. The status above updates automatically (usually within 15 minutes).`, "ok");
+    show(out, `✓ Sent for filing to ${esc(m.tag)} – ${parts.atts.length} attachment(s)${skippedNote}. The status above updates automatically (usually within 1–2 minutes).`, "ok");
     loadStatus(true).catch(fail);
     pollStatus(key);
   } catch (e) {
