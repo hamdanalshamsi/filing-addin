@@ -60,13 +60,21 @@ function hasCourtDomains() { try { return Office.context.roamingSettings.get("ha
 function hasStripTags(subject) {
   return String(subject || "").replace(/\[\s*\d{6}[A-Za-z]{0,2}\s*\]/g, "").replace(/\s{2,}/g, " ").replace(/^\s+|\s+$/g, "");
 }
+// matter number(s) go at the END of the subject: "RE: Lease agreement [261760]"
 function hasWithTag(subject, tag) {
-  var s = String(subject || "").replace(/\[\s*\d{6}[A-Za-z]{0,2}\s*\]/g, "").replace(/\s{2,}/g, " ").replace(/^\s+|\s+$/g, "");
-  var m = s.match(/^((re|fw|fwd|aw)\s*:\s*)+/i);
-  var prefix = m ? m[0] : "";
-  var tags = String(tag || "").split(","), out = "";
-  for (var i = 0; i < tags.length && i < 5; i++) { var t = tags[i].replace(/^\s+|\s+$/g, ""); if (t) out += "[" + t + "] "; }
-  return (prefix + out + s.slice(prefix.length)).replace(/\s+$/, "");
+  var s = hasStripTags(subject);
+  var tags = String(tag || "").split(","), out = [];
+  for (var i = 0; i < tags.length && out.length < 5; i++) {
+    var t = tags[i].replace(/^\s+|\s+$/g, "").toUpperCase();
+    if (t && out.indexOf("[" + t + "]") < 0) out.push("[" + t + "]");
+  }
+  return (s + " " + out.join(" ")).replace(/^\s+|\s+$/g, "");
+}
+// tags already typed in the subject, in order
+function hasTagsIn(subject) {
+  var re = /\[\s*(\d{6}[A-Za-z]{0,2})\s*\]/g, m, out = [];
+  while ((m = re.exec(String(subject || "")))) out.push(m[1].toUpperCase());
+  return out;
 }
 function hasConvId(item) { try { return item.conversationId || ""; } catch (e) { return ""; } }
 
@@ -168,8 +176,14 @@ function hasAnyRecipient(item, test, cb) {
 
 function hasCheckNormal(item, subject, finish) {
   (function () {
-    if (HAS_TAG_RE.test(subject) || HAS_SKIP_RE.test(subject)) {
-      finish({ allowEvent: true });
+    if (HAS_SKIP_RE.test(subject)) { finish({ allowEvent: true }); return; }
+    var typed = hasTagsIn(subject);
+    if (typed.length) {
+      // move the matter number(s) to the end of the subject, then send
+      var moved = hasWithTag(subject, typed.join(","));
+      if (moved === subject) { finish({ allowEvent: true }); return; }
+      try { item.subject.setAsync(moved, function () { finish({ allowEvent: true }); }); }
+      catch (e) { finish({ allowEvent: true }); }
       return;
     }
     var convTag = hasConvTag(hasConvId(item));

@@ -179,9 +179,8 @@ function tagsIn(subject) { return [...String(subject || "").matchAll(TAG_RE)].ma
 function withTag(subject, tag) {
   const add = String(tag || "").split(",").map(x => x.trim().toUpperCase()).filter(Boolean);
   const all = [...new Set([...tagsIn(subject), ...add])].slice(0, 5);
-  let s = String(subject || "").replace(TAG_RE, "").replace(/\s{2,}/g, " ").trim();
-  const prefix = (s.match(/^((re|fw|fwd|aw)\s*:\s*)+/i) || [""])[0];
-  return (prefix + all.map(t => `[${t}] `).join("") + s.slice(prefix.length).trim()).trim();
+  const s = String(subject || "").replace(TAG_RE, "").replace(/\s{2,}/g, " ").trim();
+  return (s + " " + all.map(t => `[${t}]`).join(" ")).trim();   // matter number(s) at the END of the subject
 }
 
 /* ---------- matter input ---------- */
