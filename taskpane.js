@@ -59,7 +59,9 @@ async function token(interactive) {
   const keep = (r) => { cached = { t: r.accessToken, exp: r.expiresOn ? new Date(r.expiresOn).getTime() : Date.now() + 30 * 60000 }; return r.accessToken; };
   try {
     const acct = pca.getAllAccounts().find(a => (a.username || "").toLowerCase() === login.toLowerCase());
-    return keep(await withTimeout(pca.acquireTokenSilent({ ...req, account: acct }), 12000, "Silent sign-in"));
+    // first load after an Outlook start/update can be slow: wait longer and retry once before asking the user
+    try { return keep(await withTimeout(pca.acquireTokenSilent({ ...req, account: acct }), 25000, "Silent sign-in")); }
+    catch (e1) { return keep(await withTimeout(pca.acquireTokenSilent({ ...req, account: acct }), 20000, "Silent sign-in")); }
   } catch (e) {
     if (!interactive) { const n = new Error("SIGNIN_NEEDED: " + (e.errorCode || e.message || e)); n.needSignIn = true; throw n; }
     return keep(await pca.acquireTokenPopup(req));
