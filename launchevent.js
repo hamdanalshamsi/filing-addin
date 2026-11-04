@@ -76,6 +76,8 @@ function hasTagsIn(subject) {
   while ((m = re.exec(String(subject || "")))) out.push(m[1].toUpperCase());
   return out;
 }
+// user is on the Settings "NoPromptUsers" list (synced by the HAS Filing pane): no "not tagged" pop-up
+function hasNoPrompt() { try { return Office.context.roamingSettings.get("hasNoPrompt") === true; } catch (e) { return false; } }
 function hasConvId(item) { try { return item.conversationId || ""; } catch (e) { return ""; } }
 
 /* ---- OnNewMessageCompose: reply / forward of a filed conversation gets its tag straight away ---- */
@@ -211,7 +213,7 @@ function hasCheckNormal(item, subject, finish) {
     }
 
     function decide() {
-      if (!external) { finish({ allowEvent: true }); return; }
+      if (!external || hasNoPrompt()) { finish({ allowEvent: true }); return; }
       finish(HAS_PROMPT);
     }
   })();

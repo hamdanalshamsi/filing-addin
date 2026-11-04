@@ -174,6 +174,21 @@ async function courtDomains() {
     return list;
   });
 }
+// Settings item "NoPromptUsers" (e.g. "hussein@has.law; yogita@has.law"): these users never get the
+// "not tagged to a matter" pop-up when sending. Stored per user in roaming settings for the send check.
+async function syncNoPrompt() {
+  return memoize("noprompt", 3600000, async () => {
+    const me = String(Office.context.mailbox.userProfile.emailAddress || "").toLowerCase();
+    let list = [];
+    try {
+      const j = await gjson(`/sites/${siteId}/lists/${listIds.settings}/items?expand=fields&$filter=fields/Title eq 'NoPromptUsers'&$top=1`, PREFER);
+      list = String((j && j.value[0] && j.value[0].fields.Value) || "").toLowerCase().split(/[;,\s]+/).map(x => x.trim()).filter(Boolean);
+    } catch (_) { return null; }   // could not read the setting: leave the stored value unchanged
+    const off = list.includes(me);
+    try { Office.context.roamingSettings.set("hasNoPrompt", off); Office.context.roamingSettings.saveAsync(() => {}); } catch (_) {}
+    return off;
+  });
+}
 const domainOf = (a) => String(a || "").toLowerCase().split("@").pop();
 function stripTags(subject) { return String(subject || "").replace(TAG_RE, "").replace(/\s{2,}/g, " ").trim(); }
 async function findLogByConv(convId) {
@@ -733,6 +748,7 @@ if (!IS_AUTH_POPUP) Office.onReady(async () => {
       $("c-pers").onclick = () => addMarker("[Personal]").catch(fail);
       // prefill from an existing tag in the subject, or auto-tag a reply/forward of a filed conversation
       autoTagCompose().catch(() => {});
+      syncNoPrompt().catch(() => {});
       try { $("c-matter").focus(); } catch (e) {}
     } else {
       $("read").hidden = false;
@@ -745,6 +761,7 @@ if (!IS_AUTH_POPUP) Office.onReady(async () => {
       $("r-dnf").onclick = () => onDnfClick();
       $("r-court").onchange = () => onCourtChange().catch(fail);
       // pre-tick for senders on the court domain list
+      syncNoPrompt().catch(() => {});
       courtDomains().then(d => { if (!filedState && d.includes(domainOf(Office.context.mailbox.item.from && Office.context.mailbox.item.from.emailAddress))) $("r-court").checked = true; }).catch(() => {});
       renderAttachmentList();
       loadStatus(true).catch(fail);
